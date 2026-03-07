@@ -1,0 +1,45 @@
+name: GitHub Pages
+
+on:
+  push:
+    branches:
+      - release
+
+permissions:
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build site from README
+        run: |
+          sudo apt-get install -y pandoc
+          mkdir -p _site
+          cp install.sh _site/install.sh
+          cp -r docs/screenshots _site/docs/screenshots 2>/dev/null || true
+          pandoc README.md -f markdown -t html5 --standalone \
+            --metadata title="SEGURA-CLI" \
+            -V lang=en \
+            -c "https://cdn.jsdelivr.net/npm/water.css@2/out/dark.min.css" \
+            -o _site/index.html
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

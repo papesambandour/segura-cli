@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SEGURA - Terminal</title>
+    <link rel="stylesheet" href="/css/style.css">
+    <style>
+        body { margin: 0; padding: 0; overflow: hidden; background: #000; }
+        #toolbar {
+            position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+            background: rgba(30, 30, 30, 0.95); padding: 8px 16px;
+            display: flex; align-items: center; gap: 12px;
+            border-bottom: 1px solid #333; backdrop-filter: blur(8px);
+        }
+        #toolbar .info { color: #4fc3f7; font-family: monospace; font-size: 14px; flex: 1; }
+        #toolbar .btn { padding: 6px 14px; font-size: 13px; }
+        #display {
+            position: fixed; top: 42px; left: 0; right: 0; bottom: 0;
+            overflow: hidden; cursor: default;
+        }
+        #display canvas { position: absolute; top: 0; left: 0; }
+        #status-overlay {
+            position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            background: rgba(0,0,0,0.85); color: #fff; padding: 24px 36px;
+            border-radius: 8px; font-size: 18px; display: none; z-index: 200;
+            text-align: center;
+        }
+        #status-overlay .spinner { margin: 12px auto; }
+    </style>
+</head>
+<body>
+    <div id="toolbar">
+        <span class="info" id="connInfo">Connecting...</span>
+        <button class="btn btn-secondary" id="file-manager-btn" onclick="toggleFileManager()">Files</button>
+        <button class="btn" onclick="disconnect()">Disconnect</button>
+        <a href="/" class="btn btn-secondary">Dashboard</a>
+    </div>
+    <div id="display"></div>
+
+    <!-- File Manager Panel -->
+    <div id="file-manager">
+        <div class="fm-header">
+            <h3>SFTP File Manager</h3>
+            <div class="fm-header-right">
+                <button class="fm-icon-btn" id="fm-fullscreen-btn" onclick="toggleFmFullscreen()" title="Toggle fullscreen (F11)">&#x26F6;</button>
+                <button class="fm-close" onclick="toggleFileManager()">&times;</button>
+            </div>
+        </div>
+        <!-- Toolbar -->
+        <div class="fm-toolbar" id="fm-toolbar">
+            <button class="fm-tb-btn" onclick="triggerUpload(false)" title="Upload files (Ctrl+U)">&#x2B06; Upload</button>
+            <button class="fm-tb-btn" onclick="triggerUpload(true)" title="Upload folder">&#x1F4C1; Folder</button>
+            <span class="fm-tb-sep"></span>
+            <button class="fm-tb-btn" id="fm-tb-download" onclick="downloadSelected()" disabled title="Download selected (Ctrl+D)">&#x2B07; Download</button>
+            <button class="fm-tb-btn" id="fm-tb-view" onclick="viewSelected()" disabled title="View file (Enter)">&#x1F441; View</button>
+            <span class="fm-tb-sep"></span>
+            <button class="fm-tb-btn" onclick="refreshDirectory()" title="Refresh (F5)">&#x21BB; Refresh</button>
+            <button class="fm-tb-btn" onclick="selectAll()" title="Select all (Ctrl+A)">&#x2611; All</button>
+            <button class="fm-tb-btn" id="fm-tb-clear" onclick="clearSelection()" disabled title="Clear selection (Esc)">&#x2612; None</button>
+            <span class="fm-tb-sep"></span>
+            <button class="fm-tb-btn" onclick="copyPath()" title="Copy path">&#x1F4CB; Path</button>
+        </div>
+        <!-- Breadcrumb -->
+        <div class="fm-breadcrumb" id="fm-breadcrumb"></div>
+        <!-- Column headers -->
+        <div class="fm-col-header">
+            <input type="checkbox" class="fm-checkbox" id="fm-select-all-cb" title="Select/deselect all">
+            <span class="fm-col fm-col-name" data-sort="name" onclick="toggleSort('name')">Name <span id="fm-sort-icon">&#x25BE;</span></span>
+            <span class="fm-col fm-col-type" data-sort="type" onclick="toggleSort('type')">Type</span>
+        </div>
+        <!-- File list -->
+        <div class="fm-list" id="fm-list">
+            <div class="fm-empty">SFTP not available</div>
+        </div>
+        <!-- Status bar -->
+        <div class="fm-statusbar">
+            <span id="fm-status-info">Ready</span>
+            <span id="fm-status-sel"></span>
+        </div>
+        <!-- Transfers panel -->
+        <div class="fm-transfers" id="fm-transfers">
+            <div class="fm-transfers-header">
+                <span>Transfers</span>
+                <button class="fm-close" onclick="clearTransfers()" title="Clear finished">&times;</button>
+            </div>
+            <div class="fm-progress" id="fm-progress"></div>
+        </div>
+        <!-- Drop overlay -->
+        <div class="fm-drop-overlay" id="fm-drop-overlay">
+            <div class="fm-drop-content">Drop files here to upload</div>
+        </div>
+        <!-- Hidden inputs -->
+        <input type="file" id="fm-file-input" multiple style="display:none">
+        <input type="file" id="fm-dir-input" webkitdirectory multiple style="display:none">
+    </div>
+
+    <!-- Context Menu -->
+    <div class="fm-ctx" id="fm-ctx">
+        <div class="fm-ctx-item" data-action="open">&#x1F4C2; Open</div>
+        <div class="fm-ctx-item" data-action="view">&#x1F441; View / Edit</div>
+        <div class="fm-ctx-item" data-action="download">&#x2B07; Download</div>
+        <div class="fm-ctx-sep"></div>
+        <div class="fm-ctx-item" data-action="upload">&#x2B06; Upload here...</div>
+        <div class="fm-ctx-sep"></div>
+        <div class="fm-ctx-item" data-action="copypath">&#x1F4CB; Copy path</div>
+        <div class="fm-ctx-item" data-action="copyname">&#x1F4CB; Copy name</div>
+        <div class="fm-ctx-sep"></div>
+        <div class="fm-ctx-item" data-action="refresh">&#x21BB; Refresh</div>
+        <div class="fm-ctx-item" data-action="selectall">&#x2611; Select all</div>
+    </div>
+
+    <!-- File Viewer / Editor Modal -->
+    <div id="file-viewer">
+        <div class="fv-header">
+            <div class="fv-title-area">
+                <span class="fv-file-icon" id="fv-file-icon">&#x1F4C4;</span>
+                <span class="fv-filename" id="fv-filename"></span>
+                <span class="fv-badge" id="fv-badge">READ ONLY</span>
+            </div>
+            <div class="fv-actions">
+                <span class="fv-info" id="fv-info"></span>
+                <button class="fv-tb-btn" id="fv-edit-btn" onclick="toggleEditMode()" title="Toggle edit mode">&#x270F; Edit</button>
+                <button class="fv-tb-btn fv-save-btn" id="fv-save-btn" onclick="saveFile()" title="Save file (Ctrl+S)" style="display:none; color:#3fb950;">&#x1F4BE; Save</button>
+                <span class="fv-sep"></span>
+                <button class="fv-tb-btn" id="fv-wrap-btn" onclick="toggleWordWrap()" title="Toggle word wrap (Alt+Z)">&#x21A9; Wrap</button>
+                <button class="fv-tb-btn" onclick="copyFileContent()" title="Copy all content">&#x1F4CB; Copy</button>
+                <button class="fv-tb-btn" id="fv-search-btn" onclick="toggleSearch()" title="Search (Ctrl+F)">&#x1F50D; Find</button>
+                <span class="fv-sep"></span>
+                <button class="btn btn-sm" id="fv-download-btn" onclick="downloadViewedFile()">&#x2B07; Download</button>
+                <button class="fv-close-btn" onclick="closeFileViewer()" title="Close (Escape)">&times;</button>
+            </div>
+        </div>
+        <!-- Search bar -->
+        <div class="fv-search" id="fv-search">
+            <div class="fv-search-inner">
+                <span class="fv-search-icon">&#x1F50D;</span>
+                <input type="text" class="fv-search-input" id="fv-search-input" placeholder="Search in file..." spellcheck="false">
+                <span class="fv-search-count" id="fv-search-count"></span>
+                <button class="fv-search-nav" onclick="searchPrev()" title="Previous (Shift+Enter)">&#x25B2;</button>
+                <button class="fv-search-nav" onclick="searchNext()" title="Next (Enter)">&#x25BC;</button>
+                <button class="fv-search-close" onclick="toggleSearch()">&times;</button>
+            </div>
+        </div>
+        <!-- Editor area with gutter + code -->
+        <div class="fv-editor" id="fv-editor">
+            <div class="fv-gutter" id="fv-gutter"></div>
+            <pre class="fv-code" id="fv-code"></pre>
+        </div>
+        <!-- Status bar -->
+        <div class="fv-statusbar" id="fv-statusbar">
+            <span id="fv-status-left">Ready</span>
+            <span id="fv-status-right"></span>
+        </div>
+    </div>
+
+    <div id="status-overlay">
+        <div class="spinner"></div>
+        <p id="status-text">Connecting...</p>
+    </div>
+    <script src="/js/guacamole-common.min.js"></script>
+    <script src="/js/terminal.js"></script>
+</body>
+</html>
