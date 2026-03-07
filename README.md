@@ -65,6 +65,12 @@ export SEGURA_MFA_TOKEN="YOUR_TOTP_SECRET"
 export SEGURA_TENANT="your-tenant"
 ```
 
+After setting the variables, reload your shell:
+
+```bash
+source ~/.zshrc   # or source ~/.bashrc
+```
+
 You can also use `--env /path/to/.env` to load from a file.
 
 ---
