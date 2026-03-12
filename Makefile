@@ -80,8 +80,6 @@ clean:
 # make deploy-minor → v1.0.9 -> v1.1.0  (minor)
 # make deploy-major → v1.1.0 -> v2.0.0  (major)
 
-LATEST_TAG = $(shell git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
-
 define check_clean
 	@if [ -n "$$(git status --porcelain)" ]; then \
 		echo "Error: you have uncommitted changes. Commit or stash them first."; \
@@ -90,35 +88,46 @@ define check_clean
 	fi
 endef
 
+# Fetch remote tags and find the latest one (local + remote)
+define latest_tag
+$$(git fetch --tags 2>/dev/null; git tag -l 'v*' | sort -V | tail -1 || echo "v0.0.0")
+endef
+
 deploy:
 	$(check_clean)
-	@MAJOR=$$(echo $(LATEST_TAG) | sed 's/v//' | cut -d. -f1); \
-	MINOR=$$(echo $(LATEST_TAG) | sed 's/v//' | cut -d. -f2); \
-	PATCH=$$(echo $(LATEST_TAG) | sed 's/v//' | cut -d. -f3); \
+	@LATEST=$(latest_tag); \
+	if [ -z "$$LATEST" ]; then LATEST="v0.0.0"; fi; \
+	MAJOR=$$(echo $$LATEST | sed 's/v//' | cut -d. -f1); \
+	MINOR=$$(echo $$LATEST | sed 's/v//' | cut -d. -f2); \
+	PATCH=$$(echo $$LATEST | sed 's/v//' | cut -d. -f3); \
 	PATCH=$$((PATCH + 1)); \
 	NEW_TAG="v$$MAJOR.$$MINOR.$$PATCH"; \
-	echo "$(LATEST_TAG) -> $$NEW_TAG"; \
+	echo "$$LATEST -> $$NEW_TAG"; \
 	git push origin release && \
 	git tag "$$NEW_TAG" && git push origin "$$NEW_TAG" && \
 	echo "Tag $$NEW_TAG pushed. GitHub Actions will create the release."
 
 deploy-minor:
 	$(check_clean)
-	@MAJOR=$$(echo $(LATEST_TAG) | sed 's/v//' | cut -d. -f1); \
-	MINOR=$$(echo $(LATEST_TAG) | sed 's/v//' | cut -d. -f2); \
+	@LATEST=$(latest_tag); \
+	if [ -z "$$LATEST" ]; then LATEST="v0.0.0"; fi; \
+	MAJOR=$$(echo $$LATEST | sed 's/v//' | cut -d. -f1); \
+	MINOR=$$(echo $$LATEST | sed 's/v//' | cut -d. -f2); \
 	MINOR=$$((MINOR + 1)); \
 	NEW_TAG="v$$MAJOR.$$MINOR.0"; \
-	echo "$(LATEST_TAG) -> $$NEW_TAG"; \
+	echo "$$LATEST -> $$NEW_TAG"; \
 	git push origin release && \
 	git tag "$$NEW_TAG" && git push origin "$$NEW_TAG" && \
 	echo "Tag $$NEW_TAG pushed. GitHub Actions will create the release."
 
 deploy-major:
 	$(check_clean)
-	@MAJOR=$$(echo $(LATEST_TAG) | sed 's/v//' | cut -d. -f1); \
+	@LATEST=$(latest_tag); \
+	if [ -z "$$LATEST" ]; then LATEST="v0.0.0"; fi; \
+	MAJOR=$$(echo $$LATEST | sed 's/v//' | cut -d. -f1); \
 	MAJOR=$$((MAJOR + 1)); \
 	NEW_TAG="v$$MAJOR.0.0"; \
-	echo "$(LATEST_TAG) -> $$NEW_TAG"; \
+	echo "$$LATEST -> $$NEW_TAG"; \
 	git push origin release && \
 	git tag "$$NEW_TAG" && git push origin "$$NEW_TAG" && \
 	echo "Tag $$NEW_TAG pushed. GitHub Actions will create the release."
