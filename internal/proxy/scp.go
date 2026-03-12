@@ -22,14 +22,22 @@ func CopyFile(cfg *config.Config, src, dest string, port int) error {
 	}
 
 	// Transform the remote path to senhasegura format
-	src = rewriteRemotePath(cfg, src, totp)
-	dest = rewriteRemotePath(cfg, dest, totp)
+	// Use -o User= to avoid macOS SSH % token expansion bug
+	var sshUser string
+	srcUser, src, srcRemote := rewriteRemotePath(cfg, src, totp)
+	destUser, dest, destRemote := rewriteRemotePath(cfg, dest, totp)
+	if srcRemote {
+		sshUser = srcUser
+	} else if destRemote {
+		sshUser = destUser
+	}
 
 	scpArgs := []string{
 		"-o", "StrictHostKeyChecking=no",
 		"-o", "UserKnownHostsFile=/dev/null",
 		"-o", "LogLevel=ERROR",
 		"-o", "PubkeyAuthentication=no",
+		"-o", fmt.Sprintf("User=%s", sshUser),
 		"-P", fmt.Sprintf("%d", port),
 		src, dest,
 	}
@@ -56,22 +64,19 @@ func CopyFile(cfg *config.Config, src, dest string, port int) error {
 	return nil
 }
 
-// rewriteRemotePath converts "credential@device:/path" to
-// "vaultUser[credential@device]totp@host:/path" for the senhasegura proxy.
-// Local paths are returned unchanged.
-func rewriteRemotePath(cfg *config.Config, path string, totp string) string {
-	// Check if this is a remote path (contains ":" with "@" before it)
+// rewriteRemotePath converts "credential@device:/path" to the senhasegura proxy format.
+// Returns: sshUser (for -o User=), remotePath (host:/path), isRemote.
+// Using -o User= avoids the % token expansion bug on newer macOS SSH clients.
+func rewriteRemotePath(cfg *config.Config, path string, totp string) (sshUser string, rewritten string, isRemote bool) {
 	atIdx := strings.Index(path, "@")
 	colonIdx := strings.Index(path, ":")
 
 	if atIdx == -1 || colonIdx == -1 || atIdx > colonIdx {
-		// Local path
-		return path
+		return "", path, false
 	}
 
-	// Split into credential@device and remote path
 	credential := path[:atIdx]
-	rest := path[atIdx+1:] // device:/path
+	rest := path[atIdx+1:]
 	deviceAndPath := strings.SplitN(rest, ":", 2)
 	device := deviceAndPath[0]
 	remotePath := ""
@@ -79,9 +84,8 @@ func rewriteRemotePath(cfg *config.Config, path string, totp string) string {
 		remotePath = deviceAndPath[1]
 	}
 
-	// Build senhasegura format: vaultUser[credential@device]totp%tenant@host:/path
-	return fmt.Sprintf("%s[%s@%s]%s%%%s@%s:%s",
-		cfg.User, credential, device, totp, cfg.Tenant, cfg.Host, remotePath)
+	user := fmt.Sprintf("%s[%s@%s]%s%%%s", cfg.User, credential, device, totp, cfg.Tenant)
+	return user, fmt.Sprintf("%s:%s", cfg.Host, remotePath), true
 }
 
 // IsRemotePath checks if a path string refers to a remote location.

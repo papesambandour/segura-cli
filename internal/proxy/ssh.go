@@ -34,16 +34,15 @@ func Connect(cfg *config.Config, credential, device string, port int) error {
 		return fmt.Errorf("failed to build SSH user: %w", err)
 	}
 
-	target := fmt.Sprintf("%s@%s", sshUser, cfg.Host)
-
 	sshArgs := []string{
 		"-tt",
 		"-o", "StrictHostKeyChecking=no",
 		"-o", "UserKnownHostsFile=/dev/null",
 		"-o", "LogLevel=ERROR",
 		"-o", "PubkeyAuthentication=no",
+		"-l", sshUser,
 		"-p", fmt.Sprintf("%d", port),
-		target,
+		cfg.Host,
 	}
 
 	cmd := exec.Command("ssh", sshArgs...)
