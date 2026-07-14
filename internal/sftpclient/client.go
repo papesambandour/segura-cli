@@ -109,31 +109,57 @@ func (m *Manager) GetSession(credential, device string) (*Session, error) {
 }
 
 func (m *Manager) dial(credential, device string) (*Session, error) {
-	totp, err := auth.GenerateTOTP(m.cfg.MFAToken)
+	sshClient, err := DialClient(m.cfg, credential, device)
+	if err != nil {
+		return nil, err
+	}
+
+	sftpClient, err := sftp.NewClient(sshClient)
+	if err != nil {
+		sshClient.Close()
+		return nil, fmt.Errorf("SFTP subsystem failed: %w", err)
+	}
+
+	log.Printf("SFTP session established for %s@%s", credential, device)
+	return &Session{
+		sshClient:  sshClient,
+		sftpClient: sftpClient,
+		lastUsed:   time.Now(),
+		credential: credential,
+		device:     device,
+	}, nil
+}
+
+// DialClient opens an authenticated SSH connection to the senhasegura gateway for
+// credential@device and returns the raw *ssh.Client (the caller must Close it).
+// It is the single source of gateway auth — same username formats (%tenant then
+// without), TOTP, and kex/cipher set used by SFTP sessions. Callers that need a
+// direct-tcpip channel (proxy / port-forward) build on the returned client.
+func DialClient(cfg *config.Config, credential, device string) (*ssh.Client, error) {
+	totp, err := auth.GenerateTOTP(cfg.MFAToken)
 	if err != nil {
 		return nil, fmt.Errorf("TOTP generation failed: %w", err)
 	}
 
-	// Try multiple username formats: with %tenant, then without
+	// Try multiple username formats: with %tenant, then without.
 	formats := []string{
-		fmt.Sprintf("%s[%s@%s]%s%%%s", m.cfg.User, credential, device, totp, m.cfg.Tenant),
-		fmt.Sprintf("%s[%s@%s]%s", m.cfg.User, credential, device, totp),
+		fmt.Sprintf("%s[%s@%s]%s%%%s", cfg.User, credential, device, totp, cfg.Tenant),
+		fmt.Sprintf("%s[%s@%s]%s", cfg.User, credential, device, totp),
 	}
 
-	addr := fmt.Sprintf("%s:22", m.cfg.Host)
+	addr := fmt.Sprintf("%s:22", cfg.Host)
 
 	for i, sshUser := range formats {
-		log.Printf("SFTP dial attempt %d: user=%s addr=%s", i+1, sshUser, addr)
+		log.Printf("gateway dial attempt %d: user=%s addr=%s", i+1, sshUser, addr)
 
 		sshConfig := &ssh.ClientConfig{
 			User: sshUser,
 			Auth: []ssh.AuthMethod{
-				ssh.Password(m.cfg.Password),
+				ssh.Password(cfg.Password),
 				ssh.KeyboardInteractive(func(user, instruction string, questions []string, echos []bool) ([]string, error) {
-					log.Printf("SFTP KBI: user=%q instruction=%q questions=%d", user, instruction, len(questions))
 					answers := make([]string, len(questions))
 					for i := range answers {
-						answers[i] = m.cfg.Password
+						answers[i] = cfg.Password
 					}
 					return answers, nil
 				}),
@@ -169,32 +195,17 @@ func (m *Manager) dial(credential, device string) (*Session, error) {
 
 		sshClient, err := ssh.Dial("tcp", addr, sshConfig)
 		if err != nil {
-			log.Printf("SFTP dial attempt %d failed: %v", i+1, err)
-			// Regenerate TOTP for next attempt (may have expired)
+			log.Printf("gateway dial attempt %d failed: %v", i+1, err)
+			// Regenerate TOTP for the next attempt (the code may have expired).
 			if i < len(formats)-1 {
-				totp, _ = auth.GenerateTOTP(m.cfg.MFAToken)
-				formats[i+1] = fmt.Sprintf("%s[%s@%s]%s", m.cfg.User, credential, device, totp)
+				totp, _ = auth.GenerateTOTP(cfg.MFAToken)
+				formats[i+1] = fmt.Sprintf("%s[%s@%s]%s", cfg.User, credential, device, totp)
 			}
 			continue
 		}
 
-		log.Printf("SFTP SSH connected with format %d", i+1)
-
-		sftpClient, err := sftp.NewClient(sshClient)
-		if err != nil {
-			sshClient.Close()
-			log.Printf("SFTP subsystem failed: %v", err)
-			continue
-		}
-
-		log.Printf("SFTP session established for %s@%s", credential, device)
-		return &Session{
-			sshClient:  sshClient,
-			sftpClient: sftpClient,
-			lastUsed:   time.Now(),
-			credential: credential,
-			device:     device,
-		}, nil
+		log.Printf("gateway SSH connected with format %d", i+1)
+		return sshClient, nil
 	}
 
 	return nil, fmt.Errorf("SSH connection failed: all formats tried for %s@%s on %s", credential, device, addr)
@@ -616,4 +627,13 @@ func (s *Session) Stat(path string) (fs.FileInfo, error) {
 	s.lastUsed = time.Now()
 
 	return s.sftpClient.Stat(path)
+}
+
+// Getwd returns the remote working directory (the SFTP session's home dir).
+func (s *Session) Getwd() (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lastUsed = time.Now()
+
+	return s.sftpClient.Getwd()
 }

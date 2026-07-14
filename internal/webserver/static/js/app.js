@@ -42,7 +42,7 @@
                         '<div class="ip">' + escapeHtml(cred.ip) + '</div>' +
                         '<div class="connect-hint">Connect</div>';
                     card.onclick = function() {
-                        window.location.href = '/terminal.html?username=' +
+                        window.location.href = '/console.html?username=' +
                             encodeURIComponent(cred.username) +
                             '&ip=' + encodeURIComponent(cred.ip) +
                             '&device=' + encodeURIComponent(cred.device || '');

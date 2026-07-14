@@ -8,6 +8,11 @@
     <link rel="alternate icon" href="/favicon-32.png">
     <link rel="apple-touch-icon" href="/apple-touch-icon.png">
     <link rel="stylesheet" href="/css/style.css">
+    <script>
+        // When loaded as a tab inside console.html (?embed=1), mark the root so the
+        // toolbar's brand/dashboard collapse (set before paint → no flash).
+        if (new URLSearchParams(location.search).has('embed')) document.documentElement.classList.add('embed');
+    </script>
     <style>
         body { margin: 0; padding: 0; overflow: hidden; background: #071f1c; }
         #toolbar {
@@ -28,6 +33,11 @@
             mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 3c-1.6 3.2-4.4 4.8-8 5 0 6.2 3.4 10.8 8 13 4.6-2.2 8-6.8 8-13-3.6-.2-6.4-1.8-8-5Z' fill='none' stroke='%23000' stroke-width='1.7' stroke-linejoin='round'/%3E%3Cpath d='M12 21V9M8.5 12.5 12 15l3.5-2.5' fill='none' stroke='%23000' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
         }
         #toolbar .divider { width: 1px; height: 22px; background: rgba(255,255,255,.2); }
+        /* Embedded in the multi-tab console (console.html): the shell provides the
+           brand + navigation, so hide the redundant bits and keep connInfo/Files/Disconnect. */
+        html.embed #toolbar .brand,
+        html.embed #toolbar .divider,
+        html.embed #toolbar .nav-dash { display: none; }
         #toolbar .info {
             color: #8fe6a0; font-family: "SF Mono", Menlo, Monaco, monospace; font-size: 13px; flex: 1;
             white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -55,7 +65,7 @@
         <span class="divider"></span>
         <span class="info" id="connInfo">Connecting…</span>
         <button class="btn btn-secondary" id="file-manager-btn" onclick="toggleFileManager()">Files</button>
-        <a href="/" class="btn btn-secondary">Dashboard</a>
+        <a href="/" class="btn btn-secondary nav-dash">Dashboard</a>
         <button class="btn" onclick="disconnect()">Disconnect</button>
     </div>
     <div id="display"></div>
