@@ -16,7 +16,7 @@ SSH terminal, browser-based terminal, SCP file transfer, SFTP file manager — a
 curl -sSL https://papesambandour.github.io/segura-cli/install.sh | bash
 ```
 
-This detects your OS/architecture, downloads the latest release, and installs to `~/.local/bin/segura`.
+This detects your OS/architecture, downloads the latest release, installs to `~/.local/bin/segura`, and sets up shell completion.
 
 ### Interactive install
 
@@ -117,12 +117,21 @@ Opens a local web terminal in your default browser. Auto-starts the web server d
 ### SCP File Transfer
 
 ```bash
-# Local to remote
+# Local file to remote
 segura copy localfile.txt root@10.0.4.52:/tmp/
 
-# Remote to local
+# Remote file to local
 segura copy root@10.0.4.52:/tmp/remotefile.txt ./
+
+# Local directory to remote (recursion auto-enabled)
+segura copy ./deploy/ root@10.0.4.52:/tmp/deploy/
+
+# Remote directory to local (use -r for downloads)
+segura copy -r root@10.0.4.52:/etc/app ./app-backup/
 ```
+
+Directories are copied recursively — automatically when the source is a local
+directory, or with `-r`/`--recursive` when downloading a remote directory.
 
 Requires `sshpass` (`brew install hudochenkov/sshpass/sshpass` on macOS).
 
@@ -133,6 +142,18 @@ segura login
 ```
 
 Opens senhasegura in Chrome with credentials and TOTP auto-filled.
+
+### Shell completion
+
+```bash
+segura install-completion
+```
+
+Installs tab-completion for your shell (auto-detects **zsh**, **bash**, or **fish**)
+and wires it into your shell RC. It's also run automatically during install and on
+every `segura update`, so completion stays in sync with new commands and flags.
+Restart your shell (or `source` your RC) to activate it. To generate a script
+manually instead, use `segura completion <shell>`.
 
 ### Update
 
@@ -221,7 +242,7 @@ Browse, upload, download, and edit remote files. Supports sudo for permission-re
 
 ## Build from source
 
-Requires Go 1.21+.
+Requires Go 1.25+ (see `go.mod`).
 
 ```bash
 git clone https://github.com/papesambandour/segura-cli.git
@@ -233,7 +254,7 @@ make build
 # Cross-compile all platforms
 make release
 
-# Install locally (copies to /usr/local/bin + env vars in .zshrc)
+# Install locally (copies to /usr/local/bin, env vars in .zshrc, shell completion)
 make install
 ```
 

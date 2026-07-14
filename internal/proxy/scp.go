@@ -10,12 +10,15 @@ import (
 	"segura-cli/internal/config"
 )
 
-// CopyFile transfers a file via SCP through the senhasegura Terminal Proxy.
+// CopyFile transfers a file or directory via SCP through the senhasegura Terminal Proxy.
 // It shells out to the system `sshpass` + `scp` command with the structured connection string.
 //
 // src/dest format: credential@device:/path or local path
 // The senhasegura proxy expects: vaultUser[credential@device]totp@host:/path
-func CopyFile(cfg *config.Config, src, dest string, port int) error {
+//
+// recursive forces `scp -r` (needed to download a remote directory). When the
+// local source is a directory, recursion is auto-enabled regardless of the flag.
+func CopyFile(cfg *config.Config, src, dest string, port int, recursive bool) error {
 	totp, err := auth.GenerateTOTP(cfg.MFAToken)
 	if err != nil {
 		return fmt.Errorf("failed to generate TOTP: %w", err)
@@ -34,6 +37,15 @@ func CopyFile(cfg *config.Config, src, dest string, port int) error {
 		sshUser = destUser
 	}
 
+	// Auto-enable recursion when the local source is a directory (scp requires
+	// -r for directories). Remote-source directories can't be stat'd here, so
+	// those rely on the caller passing recursive=true.
+	if !recursive && !srcRemote {
+		if info, statErr := os.Stat(src); statErr == nil && info.IsDir() {
+			recursive = true
+		}
+	}
+
 	scpArgs := []string{
 		"-o", "StrictHostKeyChecking=no",
 		"-o", "UserKnownHostsFile=/dev/null",
@@ -41,8 +53,11 @@ func CopyFile(cfg *config.Config, src, dest string, port int) error {
 		"-o", "PubkeyAuthentication=no",
 		"-o", fmt.Sprintf("User=%s", strings.ReplaceAll(sshUser, "%", "%%")),
 		"-P", fmt.Sprintf("%d", port),
-		src, dest,
 	}
+	if recursive {
+		scpArgs = append(scpArgs, "-r")
+	}
+	scpArgs = append(scpArgs, src, dest)
 
 	var cmd *exec.Cmd
 

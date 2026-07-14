@@ -9,17 +9,24 @@ import (
 	"segura-cli/internal/proxy"
 )
 
-var copyPort int
+var (
+	copyPort      int
+	copyRecursive bool
+)
 
 var copyCmd = &cobra.Command{
 	Use:   "copy <src> <dest>",
 	Short: "Copy files via SCP through senhasegura",
-	Long: `Transfers files via SCP through the senhasegura Terminal Proxy.
-Use the credential@device:/path syntax for remote paths.
+	Long: `Transfers files or directories via SCP through the senhasegura Terminal Proxy.
+Use the credential@device:/path syntax for remote paths. Local directories are
+copied recursively automatically; use -r to recurse when downloading a remote
+directory.
 
 Examples:
   segura copy ./local-file.txt root@192.168.1.10:/tmp/
+  segura copy ./deploy/ root@192.168.1.10:/tmp/deploy/
   segura copy root@192.168.1.10:/var/log/syslog ./logs/
+  segura copy -r root@192.168.1.10:/etc/app ./app-backup/
   segura copy ./config.yaml admin@webserver01:/etc/app/ --port 2222`,
 	Args: cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -41,7 +48,7 @@ Examples:
 			fmt.Printf("Uploading to %s via %s...\n", dest, cfg.Host)
 		}
 
-		if err := proxy.CopyFile(cfg, src, dest, copyPort); err != nil {
+		if err := proxy.CopyFile(cfg, src, dest, copyPort, copyRecursive); err != nil {
 			return err
 		}
 
@@ -52,5 +59,6 @@ Examples:
 
 func init() {
 	copyCmd.Flags().IntVar(&copyPort, "port", 22, "SSH port on the senhasegura host")
+	copyCmd.Flags().BoolVarP(&copyRecursive, "recursive", "r", false, "copy directories recursively (auto-enabled for local directories)")
 	rootCmd.AddCommand(copyCmd)
 }
