@@ -241,7 +241,7 @@ main { max-width: 1300px; margin: 0 auto; padding: 30px 26px 64px; }
 #file-manager-btn.visible { display: inline-block; }
 
 #file-manager {
-    position: fixed; top: 48px; right: 0; bottom: 0; width: 440px;
+    position: fixed; top: 48px; right: 0; bottom: 0; width: 560px;
     background: var(--term-surface); border-left: 1px solid var(--term-border);
     z-index: 90; display: flex; flex-direction: column;
     transform: translateX(100%); transition: transform .25s ease;
@@ -249,7 +249,7 @@ main { max-width: 1300px; margin: 0 auto; padding: 30px 26px 64px; }
 }
 #file-manager.open { transform: translateX(0); }
 #file-manager.fm-fullscreen { width: 100% !important; left: 0; border-left: none; }
-body.fm-open #display { right: 440px; }
+body.fm-open #display { right: 560px; }
 body.fm-open #display:has(~ #file-manager.fm-fullscreen) { right: 100%; }
 
 .fm-header {
@@ -404,3 +404,43 @@ body.fm-open #display:has(~ #file-manager.fm-fullscreen) { right: 100%; }
 .fv-loading { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; color: var(--term-text-muted); font-size: 14px; }
 .fv-loading .spinner { width: 28px; height: 28px; margin-bottom: 12px; border-top-color: var(--ss-green); }
 .fv-error { color: #ffb3a8; text-align: center; padding: 40px 20px; font-size: 14px; }
+
+/* ============================================================
+   SFTP file manager — operation buttons + modal
+   ============================================================ */
+.fm-tb-btn.fm-tb-danger:hover:not(:disabled) { color: #ffb3a8; background: rgba(225,82,65,.22); border-color: rgba(225,82,65,.4); }
+.fm-ctx-item.fm-ctx-danger { color: #ff9d8f; }
+.fm-ctx-item.fm-ctx-danger:hover { background: rgba(225,82,65,.28); color: #ffb3a8; }
+
+#fm-modal {
+    position: fixed; inset: 0; z-index: 400; display: none;
+    align-items: center; justify-content: center;
+    background: rgba(6,20,18,.55); backdrop-filter: blur(2px);
+}
+#fm-modal.open { display: flex; }
+.fm-modal-box {
+    width: min(90vw, 400px);
+    background: var(--term-surface); border: 1px solid var(--term-border);
+    border-top: 3px solid var(--ss-primary);
+    border-radius: 12px; padding: 20px; box-shadow: var(--shadow-pop);
+    animation: modalIn .16s cubic-bezier(.16,.84,.44,1) both;
+}
+@keyframes modalIn { from { opacity: 0; transform: translateY(8px) scale(.98); } to { opacity: 1; transform: none; } }
+.fm-modal-title { font-size: 14.5px; font-weight: 700; color: var(--term-text); margin-bottom: 14px; line-height: 1.4; }
+.fm-modal-input {
+    width: 100%; font-family: var(--font-mono); font-size: 13.5px;
+    padding: 10px 12px; border: 1px solid var(--term-border); border-radius: 8px;
+    background: var(--term-bg); color: var(--term-text); outline: none; margin-bottom: 16px;
+}
+.fm-modal-input:focus { border-color: var(--ss-primary-2); box-shadow: 0 0 0 2px rgba(0,135,133,.3); }
+.fm-modal-actions { display: flex; justify-content: flex-end; gap: 9px; }
+.fm-modal-btn {
+    padding: 8px 16px; border-radius: 8px; cursor: pointer; font-size: 12.5px; font-weight: 700;
+    font-family: var(--font-sans); border: 1px solid var(--term-border);
+    background: transparent; color: var(--term-text-muted); transition: background .15s, color .15s, border-color .15s;
+}
+.fm-modal-btn:hover { color: #fff; background: rgba(255,255,255,.08); }
+.fm-modal-btn.primary { background: var(--ss-primary); border-color: var(--ss-primary); color: #fff; }
+.fm-modal-btn.primary:hover { background: var(--ss-primary-dark); border-color: var(--ss-primary-dark); }
+.fm-modal-btn.primary.danger { background: var(--danger); border-color: var(--danger); }
+.fm-modal-btn.primary.danger:hover { background: #c23c2c; border-color: #c23c2c; }

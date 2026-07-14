@@ -207,6 +207,189 @@ func (s *Server) handleSFTPUpload(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// sftpSession resolves the shared session + common params, writing an HTTP error
+// and returning ok=false on failure.
+func (s *Server) sftpSession(w http.ResponseWriter, r *http.Request) (sess *sftpclient.Session, sudo bool, ok bool) {
+	credential := r.URL.Query().Get("username")
+	device := r.URL.Query().Get("ip")
+	if credential == "" || device == "" {
+		http.Error(w, `{"error":"username and ip required"}`, http.StatusBadRequest)
+		return nil, false, false
+	}
+	se, err := s.sftpMgr.GetSession(credential, device)
+	if err != nil {
+		log.Printf("SFTP session error: %v", err)
+		http.Error(w, fmt.Sprintf(`{"error":"SFTP connection failed: %s"}`, err.Error()), http.StatusInternalServerError)
+		return nil, false, false
+	}
+	return se, r.URL.Query().Get("sudo") == "true", true
+}
+
+// writeSFTPErr sends a JSON error including whether it was a permission error
+// (so the frontend can retry the operation with sudo).
+func writeSFTPErr(w http.ResponseWriter, err error) {
+	status := http.StatusInternalServerError
+	if sftpclient.IsPermissionError(err) {
+		status = http.StatusForbidden
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"error":           err.Error(),
+		"permissionError": sftpclient.IsPermissionError(err),
+	})
+}
+
+func writeSFTPOK(w http.ResponseWriter, extra map[string]interface{}) {
+	if extra == nil {
+		extra = map[string]interface{}{}
+	}
+	extra["status"] = "ok"
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(extra)
+}
+
+// uniqueDest returns a non-colliding path in destDir for a file/dir named `name`,
+// appending " copy", " copy 2", … if needed (keeping any file extension).
+func uniqueDest(sess *sftpclient.Session, destDir, name string) string {
+	candidate := path.Join(destDir, name)
+	if !sess.Exists(candidate) {
+		return candidate
+	}
+	base, ext := name, ""
+	if i := strings.LastIndex(name, "."); i > 0 {
+		base, ext = name[:i], name[i:]
+	}
+	for n := 1; ; n++ {
+		var alt string
+		if n == 1 {
+			alt = base + " copy" + ext
+		} else {
+			alt = fmt.Sprintf("%s copy %d%s", base, n, ext)
+		}
+		candidate = path.Join(destDir, alt)
+		if !sess.Exists(candidate) {
+			return candidate
+		}
+	}
+}
+
+// handleSFTPMkdir creates a directory. POST /api/sftp/mkdir?username=X&ip=Y[&sudo=true]  body {"path":"/dir"}
+func (s *Server) handleSFTPMkdir(w http.ResponseWriter, r *http.Request) {
+	sess, sudo, ok := s.sftpSession(w, r)
+	if !ok {
+		return
+	}
+	var req struct{ Path string `json:"path"` }
+	if json.NewDecoder(r.Body).Decode(&req) != nil || req.Path == "" {
+		http.Error(w, `{"error":"path required"}`, http.StatusBadRequest)
+		return
+	}
+	if err := sess.Mkdir(req.Path, sudo, s.cfg.Password); err != nil {
+		log.Printf("SFTP mkdir error: %v", err)
+		writeSFTPErr(w, err)
+		return
+	}
+	writeSFTPOK(w, map[string]interface{}{"path": req.Path})
+}
+
+// handleSFTPNewFile creates an empty file. POST /api/sftp/newfile  body {"path":"/f"}
+func (s *Server) handleSFTPNewFile(w http.ResponseWriter, r *http.Request) {
+	sess, sudo, ok := s.sftpSession(w, r)
+	if !ok {
+		return
+	}
+	var req struct{ Path string `json:"path"` }
+	if json.NewDecoder(r.Body).Decode(&req) != nil || req.Path == "" {
+		http.Error(w, `{"error":"path required"}`, http.StatusBadRequest)
+		return
+	}
+	if err := sess.CreateFile(req.Path, sudo, s.cfg.Password); err != nil {
+		log.Printf("SFTP newfile error: %v", err)
+		writeSFTPErr(w, err)
+		return
+	}
+	writeSFTPOK(w, map[string]interface{}{"path": req.Path})
+}
+
+// handleSFTPRename moves/renames. POST /api/sftp/rename  body {"from":"/a","to":"/b"}
+func (s *Server) handleSFTPRename(w http.ResponseWriter, r *http.Request) {
+	sess, sudo, ok := s.sftpSession(w, r)
+	if !ok {
+		return
+	}
+	var req struct {
+		From string `json:"from"`
+		To   string `json:"to"`
+	}
+	if json.NewDecoder(r.Body).Decode(&req) != nil || req.From == "" || req.To == "" {
+		http.Error(w, `{"error":"from and to required"}`, http.StatusBadRequest)
+		return
+	}
+	if err := sess.Rename(req.From, req.To, sudo, s.cfg.Password); err != nil {
+		log.Printf("SFTP rename error: %v", err)
+		writeSFTPErr(w, err)
+		return
+	}
+	writeSFTPOK(w, map[string]interface{}{"from": req.From, "to": req.To})
+}
+
+// handleSFTPCopy copies/moves items into a directory. POST /api/sftp/copy
+// body {"srcs":["/a","/b"],"destDir":"/dir","move":false}
+func (s *Server) handleSFTPCopy(w http.ResponseWriter, r *http.Request) {
+	sess, sudo, ok := s.sftpSession(w, r)
+	if !ok {
+		return
+	}
+	var req struct {
+		Srcs    []string `json:"srcs"`
+		DestDir string   `json:"destDir"`
+		Move    bool     `json:"move"`
+	}
+	if json.NewDecoder(r.Body).Decode(&req) != nil || len(req.Srcs) == 0 || req.DestDir == "" {
+		http.Error(w, `{"error":"srcs and destDir required"}`, http.StatusBadRequest)
+		return
+	}
+	var done []string
+	for _, src := range req.Srcs {
+		dst := uniqueDest(sess, req.DestDir, path.Base(src))
+		var err error
+		if req.Move {
+			err = sess.Rename(src, dst, sudo, s.cfg.Password)
+		} else {
+			err = sess.Copy(src, dst, sudo, s.cfg.Password)
+		}
+		if err != nil {
+			log.Printf("SFTP copy/move error: %v", err)
+			writeSFTPErr(w, err)
+			return
+		}
+		done = append(done, dst)
+	}
+	writeSFTPOK(w, map[string]interface{}{"paths": done, "move": req.Move})
+}
+
+// handleSFTPDelete deletes items (recursive). POST /api/sftp/delete  body {"paths":["/a","/b"]}
+func (s *Server) handleSFTPDelete(w http.ResponseWriter, r *http.Request) {
+	sess, sudo, ok := s.sftpSession(w, r)
+	if !ok {
+		return
+	}
+	var req struct{ Paths []string `json:"paths"` }
+	if json.NewDecoder(r.Body).Decode(&req) != nil || len(req.Paths) == 0 {
+		http.Error(w, `{"error":"paths required"}`, http.StatusBadRequest)
+		return
+	}
+	for _, p := range req.Paths {
+		if err := sess.Remove(p, sudo, s.cfg.Password); err != nil {
+			log.Printf("SFTP delete error: %v", err)
+			writeSFTPErr(w, err)
+			return
+		}
+	}
+	writeSFTPOK(w, map[string]interface{}{"deleted": req.Paths})
+}
+
 // handleSFTPWrite saves content to a remote file (for editing).
 // PUT /api/sftp/write?path=/file&username=X&ip=Y[&sudo=true]
 func (s *Server) handleSFTPWrite(w http.ResponseWriter, r *http.Request) {

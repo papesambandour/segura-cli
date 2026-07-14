@@ -36,6 +36,34 @@ Generic stale-while-revalidate cache in `internal/credcache/` (no import cycle):
   - **Validated:** JS valid; terminal renders + works (screenshot, no regression); blur/visibility handlers run with **no exception**; the only console error is a pre-existing benign `module is not defined` in guacamole-common.min.js (CJS build). Real-world confirmation (press `/`, types normally + no runaway) is for the user to tick off.
   - Also fixed the protocol NAK (`Receiving argument values unsupported`) by adding `guac.onargv` — matches native; separate from the `////` root cause but a real cleanup.
 
+## ✅ DONE — SFTP file manager: features + redesign
+- Backend validated by a full round-trip on the live device: mkdir, new file, rename, **copy (file + recursive dir, name-collision → "… copy")**, move, **recursive delete**. All native SFTP (SSH command exec is blocked by the senhasegura proxy — "cosh context" — so `cp -a`/`rm -rf` don't work; reimplemented with SFTP open/create/io.Copy + recursive ReadDir/Remove). Paths shell-quoted. sudo kept best-effort.
+- Frontend: in-app clipboard (copy/cut/paste, **Firefox-safe — no navigator.clipboard**), toolbar buttons + context menu + a custom prompt/confirm modal, F2 rename / Del delete, sudo-retry on permission-denied. Panel widened 440→560px. Visual confirmed by headless screenshot.
+
+## ✅ DONE — Web terminal text copy/paste (Chrome + Firefox)
+- Real root cause: a canvas terminal has no editable element, so **Cmd/Ctrl+V never fires a `paste` event on document**. Fix: a **hidden, always-focused `<textarea id="clipboard-helper">`** — Cmd/Ctrl+V fires a real paste event on it → text sent to the remote. Its keydown blocks everything except clipboard combos (Guacamole's document listener still sends the actual keystrokes), and focus is restored on mouseup/click without stealing it from real inputs.
+- Validated headlessly: the textarea is auto-focused (`activeElement === clipboard-helper`) and a paste event on it delivers the text to the remote (key events in ws-debug.log).
+- Copy: `guac.onclipboard` (copy-on-select) → `navigator.clipboard.writeText` + `execCommand` fallback + "Copied" toast, and stages the text in the textarea so Cmd/Ctrl+C copies it too.
+- Side benefit: with focus on an editable element, "/" no longer triggers browser quick-find (reinforces the earlier stuck-key fix).
+
+## (was) In progress — SFTP file manager: features + redesign
+Goal: richer, more accessible SFTP console in the web terminal.
+- **New features (backend + UI):**
+  - Create folder (mkdir) and new empty file.
+  - Copy / cut + paste for files AND folders (recursive) — into any directory. In-app clipboard (JS state + server-side `cp -a`/`mv`), **no `navigator.clipboard`** so it works on **Firefox**.
+  - Rename / move.
+  - Delete (files + folders, recursive) with confirmation.
+  - All with sudo fallback (permission-denied → retry with sudo, like upload/write).
+- **Backend:** new `Session` methods (`Mkdir`, `CreateFile`, `Rename`, `Copy`, `Remove`, `Exists`) in `sftpclient` (SFTP-native where possible, else safe shell-quoted SSH `cp -a`/`mv`/`rm -rf`); new handlers + routes (`/api/sftp/{mkdir,newfile,rename,copy,delete}`). Paths **shell-quoted** to prevent injection.
+  - Legacy TODO: only list/read/download/upload/write existed before.
+- **Redesign:** wider panel (440→~560px, resizable), better toolbar grouping + icons, keyboard accessibility, clearer selection/actions.
+- Validate: build; exercise each endpoint against the live device (mkdir → copy → paste → rename → delete round-trip); confirm UI works incl. Firefox paste.
+
+## In progress — Web terminal text copy/paste (broken on Chrome + Firefox)
+- **Paste**: the Ctrl/Cmd+V keydown handler called `e.preventDefault()`, which **blocked the browser's native `paste` event** (the reliable, permission-free clipboard read) and fell back to `navigator.clipboard.readText()` (restricted → fails on Firefox, needs permission on Chrome). Fix: don't preventDefault Ctrl+V; use the native `paste` event (also covers right-click > Paste) → works on Chrome + Firefox.
+- **Copy**: `guac.onclipboard` → `navigator.clipboard.writeText` (can fail silently). Add a fallback + a "Copied" toast so the user gets feedback.
+- Validate: headless-Chrome test (set clipboard, Ctrl+V → the pasted text's key events reach the remote in ws-debug.log).
+
 ## Known issues / to investigate
 - *(none open)*
   - **Investigation done (this session):** reproduced the full web session headlessly (headless Chrome CAN reach localhost, the extension browser cannot). Captured: `SEGURA_DEBUG_WS` frames + 1 idle screenshot (40s) + 10 burst screenshots across the connect/render window + a zoom on the right edge.

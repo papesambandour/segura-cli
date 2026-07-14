@@ -43,6 +43,11 @@ func Start(cfg *config.Config, port int) error {
 	mux.HandleFunc("/api/sftp/download", srv.handleSFTPDownload)
 	mux.HandleFunc("/api/sftp/upload", srv.handleSFTPUpload)
 	mux.HandleFunc("/api/sftp/write", srv.handleSFTPWrite)
+	mux.HandleFunc("/api/sftp/mkdir", srv.handleSFTPMkdir)
+	mux.HandleFunc("/api/sftp/newfile", srv.handleSFTPNewFile)
+	mux.HandleFunc("/api/sftp/rename", srv.handleSFTPRename)
+	mux.HandleFunc("/api/sftp/copy", srv.handleSFTPCopy)
+	mux.HandleFunc("/api/sftp/delete", srv.handleSFTPDelete)
 
 	// Static files
 	staticFS, err := fs.Sub(staticFiles, "static")

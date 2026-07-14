@@ -343,6 +343,196 @@ func (s *Session) WriteFileSudo(path string, data []byte, password string) error
 	return nil
 }
 
+// runCmd executes a plain (non-sudo) command over SSH and returns its combined output.
+func (s *Session) runCmd(cmd string) ([]byte, error) {
+	session, err := s.sshClient.NewSession()
+	if err != nil {
+		return nil, fmt.Errorf("SSH session failed: %w", err)
+	}
+	defer session.Close()
+	log.Printf("SFTP exec: %s", cmd)
+	return session.CombinedOutput(cmd)
+}
+
+// shellQuote single-quotes a string so it is safe to embed in a shell command,
+// preventing path/command injection.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// cmdError wraps a command failure with its output so IsPermissionError can see it.
+func cmdError(action string, out []byte, err error) error {
+	msg := strings.TrimSpace(string(out))
+	if msg == "" {
+		return fmt.Errorf("%s failed: %w", action, err)
+	}
+	return fmt.Errorf("%s failed: %s", action, msg)
+}
+
+// Exists reports whether a path exists on the remote.
+func (s *Session) Exists(path string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.sftpClient.Stat(path)
+	return err == nil
+}
+
+// Mkdir creates a directory (and any missing parents).
+func (s *Session) Mkdir(path string, sudo bool, password string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lastUsed = time.Now()
+	if sudo {
+		out, err := s.runSudoCmd("mkdir -p -- "+shellQuote(path), password)
+		if err != nil {
+			return cmdError("mkdir", out, err)
+		}
+		return nil
+	}
+	if err := s.sftpClient.MkdirAll(path); err != nil {
+		return fmt.Errorf("mkdir %s: %w", path, err)
+	}
+	return nil
+}
+
+// CreateFile creates a new empty file (fails if it already exists).
+func (s *Session) CreateFile(path string, sudo bool, password string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lastUsed = time.Now()
+	if sudo {
+		out, err := s.runSudoCmd("touch -- "+shellQuote(path), password)
+		if err != nil {
+			return cmdError("create file", out, err)
+		}
+		return nil
+	}
+	f, err := s.sftpClient.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL)
+	if err != nil {
+		return fmt.Errorf("create %s: %w", path, err)
+	}
+	f.Close()
+	return nil
+}
+
+// Rename moves or renames a file or directory.
+func (s *Session) Rename(oldPath, newPath string, sudo bool, password string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lastUsed = time.Now()
+	if sudo {
+		out, err := s.runSudoCmd("mv -f -- "+shellQuote(oldPath)+" "+shellQuote(newPath), password)
+		if err != nil {
+			return cmdError("move", out, err)
+		}
+		return nil
+	}
+	if err := s.sftpClient.Rename(oldPath, newPath); err != nil {
+		// Cross-device or other SFTP rename failures fall back to mv.
+		out, cerr := s.runCmd("mv -f -- " + shellQuote(oldPath) + " " + shellQuote(newPath))
+		if cerr != nil {
+			return cmdError("move", out, cerr)
+		}
+	}
+	return nil
+}
+
+// Copy copies a file or directory (recursive, preserving attributes) to dst.
+func (s *Session) Copy(src, dst string, sudo bool, password string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lastUsed = time.Now()
+	if sudo {
+		out, err := s.runSudoCmd("cp -a -- "+shellQuote(src)+" "+shellQuote(dst), password)
+		if err != nil {
+			return cmdError("copy", out, err)
+		}
+		return nil
+	}
+	return s.copyRecursive(src, dst)
+}
+
+func (s *Session) copyRecursive(src, dst string) error {
+	info, err := s.sftpClient.Lstat(src)
+	if err != nil {
+		return fmt.Errorf("stat %s: %w", src, err)
+	}
+	if info.IsDir() {
+		if err := s.sftpClient.Mkdir(dst); err != nil {
+			return fmt.Errorf("mkdir %s: %w", dst, err)
+		}
+		_ = s.sftpClient.Chmod(dst, info.Mode().Perm())
+		entries, err := s.sftpClient.ReadDir(src)
+		if err != nil {
+			return fmt.Errorf("read %s: %w", src, err)
+		}
+		for _, e := range entries {
+			if err := s.copyRecursive(joinRemote(src, e.Name()), joinRemote(dst, e.Name())); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	sf, err := s.sftpClient.Open(src)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", src, err)
+	}
+	defer sf.Close()
+	df, err := s.sftpClient.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
+	if err != nil {
+		return fmt.Errorf("create %s: %w", dst, err)
+	}
+	defer df.Close()
+	if _, err := io.Copy(df, sf); err != nil {
+		return fmt.Errorf("copy %s: %w", src, err)
+	}
+	_ = s.sftpClient.Chmod(dst, info.Mode().Perm())
+	return nil
+}
+
+// joinRemote joins remote path segments with "/" (remote paths are POSIX).
+func joinRemote(dir, name string) string {
+	if strings.HasSuffix(dir, "/") {
+		return dir + name
+	}
+	return dir + "/" + name
+}
+
+// Remove deletes a file or directory (recursive).
+func (s *Session) Remove(path string, sudo bool, password string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lastUsed = time.Now()
+	if sudo {
+		out, err := s.runSudoCmd("rm -rf -- "+shellQuote(path), password)
+		if err != nil {
+			return cmdError("delete", out, err)
+		}
+		return nil
+	}
+	return s.removeRecursive(path)
+}
+
+func (s *Session) removeRecursive(p string) error {
+	info, err := s.sftpClient.Lstat(p)
+	if err != nil {
+		return fmt.Errorf("stat %s: %w", p, err)
+	}
+	if info.IsDir() {
+		entries, err := s.sftpClient.ReadDir(p)
+		if err != nil {
+			return fmt.Errorf("read %s: %w", p, err)
+		}
+		for _, e := range entries {
+			if err := s.removeRecursive(joinRemote(p, e.Name())); err != nil {
+				return err
+			}
+		}
+		return s.sftpClient.RemoveDirectory(p)
+	}
+	return s.sftpClient.Remove(p)
+}
+
 // Download streams a file to the writer.
 func (s *Session) Download(path string, w io.Writer) (int64, fs.FileInfo, error) {
 	s.mu.Lock()

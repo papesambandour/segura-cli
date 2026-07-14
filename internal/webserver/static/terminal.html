@@ -59,6 +59,11 @@
         <button class="btn" onclick="disconnect()">Disconnect</button>
     </div>
     <div id="display"></div>
+    <!-- Hidden, always-focused capture area so Cmd/Ctrl+V fires a real paste event
+         and Cmd/Ctrl+C copies the current terminal selection (works on Chrome + Firefox). -->
+    <textarea id="clipboard-helper" aria-hidden="true" tabindex="-1" autocomplete="off"
+        autocorrect="off" autocapitalize="off" spellcheck="false"
+        style="position:fixed; top:0; left:-9999px; width:1px; height:1px; opacity:0; border:0; padding:0; resize:none; z-index:-1;"></textarea>
 
     <!-- File Manager Panel -->
     <div id="file-manager">
@@ -71,8 +76,17 @@
         </div>
         <!-- Toolbar -->
         <div class="fm-toolbar" id="fm-toolbar">
+            <button class="fm-tb-btn" onclick="newFolder()" title="New folder">&#x1F4C1;&#x271A; New folder</button>
+            <button class="fm-tb-btn" onclick="newFile()" title="New file">&#x1F4C4;&#x271A; New file</button>
+            <span class="fm-tb-sep"></span>
             <button class="fm-tb-btn" onclick="triggerUpload(false)" title="Upload files (Ctrl+U)">&#x2B06; Upload</button>
-            <button class="fm-tb-btn" onclick="triggerUpload(true)" title="Upload folder">&#x1F4C1; Folder</button>
+            <button class="fm-tb-btn" onclick="triggerUpload(true)" title="Upload folder">&#x1F4E4; Upload folder</button>
+            <span class="fm-tb-sep"></span>
+            <button class="fm-tb-btn" id="fm-tb-copy" onclick="copySelection()" disabled title="Copy (Ctrl+C)">&#x2398; Copy</button>
+            <button class="fm-tb-btn" id="fm-tb-cut" onclick="cutSelection()" disabled title="Cut (Ctrl+X)">&#x2702; Cut</button>
+            <button class="fm-tb-btn" id="fm-tb-paste" onclick="pasteClipboard()" disabled title="Paste here (Ctrl+V)">&#x1F4CB; Paste</button>
+            <button class="fm-tb-btn" id="fm-tb-rename" onclick="renameSelected()" disabled title="Rename (F2)">&#x270E; Rename</button>
+            <button class="fm-tb-btn fm-tb-danger" id="fm-tb-delete" onclick="deleteSelected()" disabled title="Delete (Del)">&#x1F5D1; Delete</button>
             <span class="fm-tb-sep"></span>
             <button class="fm-tb-btn" id="fm-tb-download" onclick="downloadSelected()" disabled title="Download selected (Ctrl+D)">&#x2B07; Download</button>
             <button class="fm-tb-btn" id="fm-tb-view" onclick="viewSelected()" disabled title="View file (Enter)">&#x1F441; View</button>
@@ -80,8 +94,7 @@
             <button class="fm-tb-btn" onclick="refreshDirectory()" title="Refresh (F5)">&#x21BB; Refresh</button>
             <button class="fm-tb-btn" onclick="selectAll()" title="Select all (Ctrl+A)">&#x2611; All</button>
             <button class="fm-tb-btn" id="fm-tb-clear" onclick="clearSelection()" disabled title="Clear selection (Esc)">&#x2612; None</button>
-            <span class="fm-tb-sep"></span>
-            <button class="fm-tb-btn" onclick="copyPath()" title="Copy path">&#x1F4CB; Path</button>
+            <button class="fm-tb-btn" onclick="copyPath()" title="Copy path">&#x1F517; Path</button>
         </div>
         <!-- Breadcrumb -->
         <div class="fm-breadcrumb" id="fm-breadcrumb"></div>
@@ -123,13 +136,33 @@
         <div class="fm-ctx-item" data-action="view">&#x1F441; View / Edit</div>
         <div class="fm-ctx-item" data-action="download">&#x2B07; Download</div>
         <div class="fm-ctx-sep"></div>
+        <div class="fm-ctx-item" data-action="copy">&#x2398; Copy</div>
+        <div class="fm-ctx-item" data-action="cut">&#x2702; Cut</div>
+        <div class="fm-ctx-item" data-action="paste">&#x1F4CB; Paste here</div>
+        <div class="fm-ctx-item" data-action="rename">&#x270E; Rename</div>
+        <div class="fm-ctx-item fm-ctx-danger" data-action="delete">&#x1F5D1; Delete</div>
+        <div class="fm-ctx-sep"></div>
+        <div class="fm-ctx-item" data-action="newfolder">&#x1F4C1;&#x271A; New folder</div>
+        <div class="fm-ctx-item" data-action="newfile">&#x1F4C4;&#x271A; New file</div>
         <div class="fm-ctx-item" data-action="upload">&#x2B06; Upload here...</div>
         <div class="fm-ctx-sep"></div>
-        <div class="fm-ctx-item" data-action="copypath">&#x1F4CB; Copy path</div>
-        <div class="fm-ctx-item" data-action="copyname">&#x1F4CB; Copy name</div>
+        <div class="fm-ctx-item" data-action="copypath">&#x1F517; Copy path</div>
+        <div class="fm-ctx-item" data-action="copyname">&#x1F4DD; Copy name</div>
         <div class="fm-ctx-sep"></div>
         <div class="fm-ctx-item" data-action="refresh">&#x21BB; Refresh</div>
         <div class="fm-ctx-item" data-action="selectall">&#x2611; Select all</div>
+    </div>
+
+    <!-- Prompt / confirm modal -->
+    <div id="fm-modal">
+        <div class="fm-modal-box">
+            <div class="fm-modal-title" id="fm-modal-title"></div>
+            <input type="text" class="fm-modal-input" id="fm-modal-input" spellcheck="false" autocomplete="off">
+            <div class="fm-modal-actions">
+                <button class="fm-modal-btn" id="fm-modal-cancel">Cancel</button>
+                <button class="fm-modal-btn primary" id="fm-modal-ok">OK</button>
+            </div>
+        </div>
     </div>
 
     <!-- File Viewer / Editor Modal -->

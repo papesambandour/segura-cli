@@ -464,6 +464,7 @@
             fmStatusSel.textContent = '';
         }
         fmSelectAllCb.checked = (count > 0 && count === currentEntries.length);
+        if (typeof updateFmButtons === 'function') updateFmButtons();
     }
 
     // =============================================
@@ -534,8 +535,145 @@
             case 'selectall':
                 selectAll();
                 break;
+            case 'newfolder': newFolder(); break;
+            case 'newfile':   newFile(); break;
+            case 'rename':    renameSelected(); break;
+            case 'copy':      copySelection(false); break;
+            case 'cut':       copySelection(true); break;
+            case 'paste':     pasteClipboard(); break;
+            case 'delete':    deleteSelected(); break;
         }
     });
+
+    // =============================================
+    //  FILE OPERATIONS (mkdir, new file, rename, copy/cut/paste, delete)
+    // =============================================
+    var fmClipboard = { srcs: [], move: false };
+
+    function joinPath(dir, name) { return dir === '/' ? '/' + name : dir.replace(/\/+$/, '') + '/' + name; }
+    function parentOf(p) { var q = p.replace(/\/+$/, ''); var i = q.lastIndexOf('/'); return i <= 0 ? '/' : q.slice(0, i); }
+    function opTargets() { return selectedFiles.length ? selectedFiles.slice() : (ctxTarget ? [ctxTarget] : []); }
+
+    // POST helper with automatic sudo-retry on permission errors.
+    function sftpOp(endpoint, body, onDone) {
+        function post(sudo) {
+            return fetch(sftpUrl(endpoint, sudo ? 'sudo=true' : ''), {
+                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+            }).then(function(resp) { return resp.json().then(function(d) { return { ok: resp.ok, data: d }; }); });
+        }
+        post(false).then(function(r) {
+            if (r.ok) { onDone && onDone(r.data); return; }
+            if (r.data && r.data.permissionError) {
+                fmConfirm('Permission denied. Retry with sudo?', function() {
+                    post(true).then(function(r2) {
+                        if (r2.ok) onDone && onDone(r2.data);
+                        else showToast('Failed: ' + ((r2.data && r2.data.error) || 'error'));
+                    });
+                });
+            } else {
+                showToast('Failed: ' + ((r.data && r.data.error) || 'error'));
+            }
+        }).catch(function(err) { showToast('Failed: ' + err.message); });
+    }
+
+    function newFolder() {
+        fmPrompt('New folder', 'Folder name', 'new-folder', function(name) {
+            if (!name) return;
+            sftpOp('mkdir', { path: joinPath(currentPath, name) }, function() { refreshDirectory(); showToast('Folder created'); });
+        });
+    }
+    function newFile() {
+        fmPrompt('New file', 'File name', 'untitled.txt', function(name) {
+            if (!name) return;
+            sftpOp('newfile', { path: joinPath(currentPath, name) }, function() { refreshDirectory(); showToast('File created'); });
+        });
+    }
+    function renameSelected() {
+        var t = ctxTarget || (selectedFiles.length === 1 ? selectedFiles[0] : null);
+        if (!t) { showToast('Select a single item to rename'); return; }
+        fmPrompt('Rename', 'New name', t.name, function(name) {
+            if (!name || name === t.name) return;
+            sftpOp('rename', { from: t.fullPath, to: joinPath(parentOf(t.fullPath), name) }, function() { refreshDirectory(); showToast('Renamed'); });
+        });
+    }
+    function copySelection(move) {
+        var items = opTargets();
+        if (!items.length) { showToast('Nothing selected'); return; }
+        fmClipboard = { srcs: items.map(function(i) { return i.fullPath; }), move: !!move };
+        updateFmButtons();
+        showToast((move ? 'Cut ' : 'Copied ') + items.length + ' item' + (items.length > 1 ? 's' : ''));
+    }
+    function pasteClipboard() {
+        if (!fmClipboard.srcs.length) { showToast('Clipboard is empty'); return; }
+        sftpOp('copy', { srcs: fmClipboard.srcs, destDir: currentPath, move: fmClipboard.move }, function() {
+            if (fmClipboard.move) fmClipboard = { srcs: [], move: false };
+            updateFmButtons(); refreshDirectory(); showToast('Pasted');
+        });
+    }
+    function deleteSelected() {
+        var items = opTargets();
+        if (!items.length) { showToast('Nothing selected'); return; }
+        var label = items.length === 1 ? '"' + items[0].name + '"' : items.length + ' items';
+        fmConfirm('Delete ' + label + '? This cannot be undone.', function() {
+            sftpOp('delete', { paths: items.map(function(i) { return i.fullPath; }) }, function() { refreshDirectory(); showToast('Deleted'); });
+        }, true);
+    }
+
+    function updateFmButtons() {
+        var hasSel = selectedFiles.length > 0;
+        var one = selectedFiles.length === 1;
+        var setDis = function(id, dis) { var b = document.getElementById(id); if (b) b.disabled = dis; };
+        setDis('fm-tb-rename', !one);
+        setDis('fm-tb-copy', !hasSel);
+        setDis('fm-tb-cut', !hasSel);
+        setDis('fm-tb-delete', !hasSel);
+        setDis('fm-tb-paste', fmClipboard.srcs.length === 0);
+    }
+
+    window.newFolder = newFolder;
+    window.newFile = newFile;
+    window.renameSelected = renameSelected;
+    window.copySelection = function() { copySelection(false); };
+    window.cutSelection = function() { copySelection(true); };
+    window.pasteClipboard = pasteClipboard;
+    window.deleteSelected = deleteSelected;
+
+    // --- Lightweight modal for prompt / confirm (accessible, no native dialogs) ---
+    function fmModal(cfg) {
+        var ov = document.getElementById('fm-modal');
+        var titleEl = document.getElementById('fm-modal-title');
+        var inputEl = document.getElementById('fm-modal-input');
+        var okBtn = document.getElementById('fm-modal-ok');
+        var cancelBtn = document.getElementById('fm-modal-cancel');
+        titleEl.textContent = cfg.title;
+        okBtn.textContent = cfg.okLabel || 'OK';
+        okBtn.classList.toggle('danger', !!cfg.danger);
+        if (cfg.input) {
+            inputEl.style.display = '';
+            inputEl.value = cfg.value || '';
+            inputEl.placeholder = cfg.placeholder || '';
+        } else {
+            inputEl.style.display = 'none';
+        }
+        ov.classList.add('open');
+        if (cfg.input) { inputEl.focus(); inputEl.select(); } else { okBtn.focus(); }
+
+        function close() { ov.classList.remove('open'); okBtn.onclick = cancelBtn.onclick = inputEl.onkeydown = ov.onmousedown = null; }
+        okBtn.onclick = function() { var v = cfg.input ? inputEl.value.trim() : true; close(); cfg.onOk && cfg.onOk(v); };
+        cancelBtn.onclick = close;
+        ov.onmousedown = function(e) { if (e.target === ov) close(); };
+        inputEl.onkeydown = function(e) {
+            if (e.key === 'Enter') { e.preventDefault(); okBtn.click(); }
+            else if (e.key === 'Escape') { e.preventDefault(); close(); }
+            e.stopPropagation();
+        };
+    }
+    function fmPrompt(title, placeholder, value, onOk) {
+        fmModal({ title: title, input: true, placeholder: placeholder, value: value, okLabel: 'OK', onOk: onOk });
+    }
+    function fmConfirm(msg, onOk, danger) {
+        fmModal({ title: msg, input: false, okLabel: danger ? 'Delete' : 'Confirm', danger: danger, onOk: function() { onOk(); } });
+    }
 
     fmList.addEventListener('contextmenu', function(e) {
         if (e.target === fmList || e.target.classList.contains('fm-empty')) {
@@ -1290,6 +1428,8 @@
         if (!fmOpen) return;
 
         if (e.key === 'F5') { e.preventDefault(); refreshDirectory(); return; }
+        if (e.key === 'F2') { e.preventDefault(); renameSelected(); return; }
+        if (e.key === 'Delete' && selectedFiles.length > 0) { e.preventDefault(); deleteSelected(); return; }
         if ((e.ctrlKey || e.metaKey) && e.key === 'a') { e.preventDefault(); selectAll(); return; }
         if ((e.ctrlKey || e.metaKey) && e.key === 'd') { e.preventDefault(); downloadSelected(); return; }
         if ((e.ctrlKey || e.metaKey) && e.key === 'u') { e.preventDefault(); triggerUpload(false); return; }
@@ -1391,27 +1531,50 @@
 
     window.addEventListener('resize', resizeGuac);
 
-    // PASTE: intercept Ctrl+V, read clipboard, type into remote terminal
-    document.addEventListener('keydown', function(e) {
-        if ((e.ctrlKey || e.metaKey) && (e.key === 'v' || e.key === 'V')) {
-            e.preventDefault();
-            if (navigator.clipboard && navigator.clipboard.readText) {
-                navigator.clipboard.readText().then(function(text) {
-                    if (!text) return;
-                    sendTextToTerminal(text);
-                }).catch(function() {});
-            }
-        }
-        // Ctrl+C: copy selected text from page to clipboard (browser default)
-        // Ctrl+A: select all (browser default)
-        // Both are allowed by not calling e.preventDefault()
-    });
+    // PASTE — cross-browser (Chrome + Firefox). The reliable, permission-free way
+    // to read the clipboard is the browser's native "paste" event (fired by both
+    // Ctrl/Cmd+V and right-click > Paste). We deliberately do NOT preventDefault the
+    // Ctrl/Cmd+V keydown: doing so suppresses that native paste event and forces a
+    // fallback to navigator.clipboard.readText(), which is blocked on Firefox and
+    // needs a permission prompt on Chrome. Guacamole already leaves Ctrl+V to the
+    // browser (its onkeydown returns false for it), so the paste event fires here.
+    var clip = document.getElementById('clipboard-helper');
+    function handlePaste(e) {
+        var cd = e.clipboardData || window.clipboardData;
+        if (!cd) return;
+        var text = cd.getData('text/plain') || cd.getData('text') || '';
+        if (text) { e.preventDefault(); sendTextToTerminal(text); }
+        if (clip) clip.value = '';
+    }
+    if (clip) {
+        clip.addEventListener('paste', handlePaste);
+        // Guacamole (its document listener) sends the actual keystroke to the
+        // remote. We block every key except clipboard combos so nothing piles up
+        // in the hidden field, while Cmd/Ctrl+C/V/X/A still reach the browser as
+        // real clipboard actions (and "/" no longer triggers browser quick-find,
+        // because focus is on an editable element).
+        clip.addEventListener('keydown', function(e) {
+            var k = (e.key || '').toLowerCase();
+            var combo = (e.ctrlKey || e.metaKey) && (k === 'c' || k === 'v' || k === 'x' || k === 'a');
+            if (!combo) e.preventDefault();
+        });
+        clip.addEventListener('input', function() { clip.value = ''; });
 
-    // Also handle paste event (right-click paste, etc.)
-    window.addEventListener('paste', function(e) {
-        var text = (e.clipboardData || window.clipboardData).getData('text');
-        if (text) sendTextToTerminal(text);
-    });
+        // Keep the capture area focused, but never steal focus from real inputs
+        // (file-manager search, viewer, modal).
+        function focusClip() {
+            var a = document.activeElement;
+            if (a && a !== clip && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA' || a.isContentEditable)) return;
+            try { clip.focus({ preventScroll: true }); } catch (e2) { try { clip.focus(); } catch (e3) {} }
+        }
+        window.focusClip = focusClip;
+        document.addEventListener('mouseup', function() { setTimeout(focusClip, 0); });
+        document.addEventListener('click', function() { setTimeout(focusClip, 0); });
+        window.addEventListener('focus', focusClip);
+        setTimeout(focusClip, 400);
+    }
+    // Fallback: some browsers do fire paste on the document itself.
+    document.addEventListener('paste', handlePaste);
 
     // Helper: send text char-by-char to remote terminal
     function sendTextToTerminal(text) {
@@ -1440,16 +1603,60 @@
         reader.onend = function() { /* stream fully read & acked */ };
     };
 
-    // COPY: remote clipboard -> browser clipboard
+    // COPY: remote clipboard (a terminal selection) -> browser clipboard.
+    // Try the async Clipboard API, then fall back to a hidden-textarea +
+    // execCommand('copy') which works where writeText is blocked.
+    function copyToClipboard(text) {
+        if (!text) return;
+        var done = function(ok) { showToast(ok ? 'Copied to clipboard' : 'Copy blocked by the browser'); };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(function() { done(true); }, function() { done(legacyCopy(text)); });
+        } else {
+            done(legacyCopy(text));
+        }
+    }
+    function legacyCopy(text) {
+        try {
+            var ta = document.createElement('textarea');
+            ta.value = text;
+            ta.setAttribute('readonly', '');
+            ta.style.cssText = 'position:fixed;top:0;left:-9999px;opacity:0;';
+            document.body.appendChild(ta);
+            ta.select(); ta.setSelectionRange(0, text.length);
+            var ok = document.execCommand('copy');
+            document.body.removeChild(ta);
+            return ok;
+        } catch (e) { return false; }
+    }
+    var toastTimer;
+    function showToast(msg) {
+        var el = document.getElementById('segura-toast');
+        if (!el) {
+            el = document.createElement('div');
+            el.id = 'segura-toast';
+            el.style.cssText = 'position:fixed;bottom:20px;left:50%;transform:translateX(-50%);' +
+                'background:#0d3330;color:#e7f0ef;border:1px solid #1f4f4a;border-left:3px solid #7ee787;' +
+                'padding:9px 16px;border-radius:8px;font:600 12.5px/1 "Inter",Helvetica,Arial,sans-serif;' +
+                'z-index:500;box-shadow:0 8px 24px rgba(0,0,0,.35);opacity:0;transition:opacity .18s;pointer-events:none;';
+            document.body.appendChild(el);
+        }
+        el.textContent = msg;
+        el.style.opacity = '1';
+        clearTimeout(toastTimer);
+        toastTimer = setTimeout(function() { el.style.opacity = '0'; }, 1600);
+    }
+
     guac.onclipboard = function(stream, mimetype) {
         if (mimetype === 'text/plain') {
             var reader = new Guacamole.StringReader(stream);
             var data = '';
             reader.ontext = function(text) { data += text; };
             reader.onend = function() {
-                if (navigator.clipboard && navigator.clipboard.writeText) {
-                    navigator.clipboard.writeText(data).catch(function() {});
-                }
+                // A terminal selection just landed. Copy it to the system clipboard
+                // now (copy-on-select), and also stage it in the hidden field so a
+                // subsequent Cmd/Ctrl+C copies the same text.
+                copyToClipboard(data);
+                if (clip) { clip.value = data; try { clip.select(); } catch (e) {} }
             };
         }
     };
