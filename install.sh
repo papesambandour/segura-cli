@@ -120,6 +120,15 @@ ensure_path() {
     export PATH="$INSTALL_DIR:$PATH"
 }
 
+# ─── Install shell completion ────────────────────────────────────────────────
+install_completion() {
+    if "${INSTALL_DIR}/${BINARY}" install-completion >/dev/null 2>&1; then
+        ok "Shell completion installed (restart your shell to activate)"
+    else
+        info "Shell completion skipped — run 'segura install-completion' manually if wanted"
+    fi
+}
+
 # ─── Interactive: prompt for env vars ────────────────────────────────────────
 configure_env() {
     if ! is_interactive; then
@@ -203,6 +212,7 @@ main() {
     download_binary
     install_binary "$DOWNLOAD_TMP"
     ensure_path
+    install_completion
     configure_env
 
     echo ""

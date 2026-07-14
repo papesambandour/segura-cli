@@ -70,6 +70,16 @@ var updateCmd = &cobra.Command{
 		}
 
 		fmt.Printf("Updated segura to %s\n", latestTag)
+
+		// Refresh shell completion so new commands/flags autocomplete.
+		// Best-effort: never fail the update over completion.
+		if shell := detectShell(); shell != "" {
+			if path, _, cerr := installShellCompletion(shell); cerr != nil {
+				fmt.Fprintf(os.Stderr, "Note: could not refresh %s completion: %v\n", shell, cerr)
+			} else {
+				fmt.Printf("Refreshed %s completion (%s)\n", shell, path)
+			}
+		}
 		return nil
 	},
 }

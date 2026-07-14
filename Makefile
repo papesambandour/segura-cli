@@ -57,6 +57,8 @@ install: build
 		echo "$(BLOCK_TAG) end" >> "$(ZSHRC)"; \
 		echo "    Env vars added to $(ZSHRC). Run: source $(ZSHRC)"; \
 	fi
+	@echo "==> Installing shell completion..."
+	@$(INSTALL) install-completion || echo "    (completion skipped; run '$(BINARY) install-completion' manually)"
 	@echo "==> Done. Run 'source $(ZSHRC)' to load env vars."
 
 uninstall:
