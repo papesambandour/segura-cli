@@ -1356,6 +1356,33 @@
         guac.sendKeyEvent(0, keysym);
     };
 
+    // STUCK-KEY GUARD. If a browser shortcut steals focus mid-keystroke (e.g.
+    // Firefox opens quick-find on "/"), the matching key-up is delivered to the
+    // browser chrome instead of Guacamole, so the key stays "pressed" and repeats
+    // forever (the runaway "////" bug). Releasing every key whenever the terminal
+    // loses focus or is hidden clears any such stuck key.
+    function releaseAllKeys() {
+        try { keyboard.reset(); } catch (e) {}
+        ctrlPressed = false;
+    }
+    window.addEventListener('blur', releaseAllKeys);
+    document.addEventListener('visibilitychange', function() {
+        if (document.hidden) releaseAllKeys();
+    });
+
+    // Keep terminal keystrokes in the terminal: stop the browser from hijacking
+    // keys that would otherwise trigger a shortcut and steal focus (Firefox's "/"
+    // and "'" quick-find, backspace navigation, etc.). Skip real input fields
+    // (file-manager / viewer search) and clipboard shortcuts.
+    document.addEventListener('keydown', function(e) {
+        var t = e.target;
+        if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+        if (e.ctrlKey || e.metaKey || e.altKey) return; // let clipboard/browser combos through
+        if (e.key === '/' || e.key === "'" || e.key === 'Backspace') {
+            e.preventDefault();
+        }
+    }, true);
+
     var mouse = new Guacamole.Mouse(guacDisplay.getElement());
     mouse.onmousedown = mouse.onmouseup = mouse.onmousemove = function(ms) { guac.sendMouseState(ms); };
 
@@ -1400,6 +1427,18 @@
             guac.sendKeyEvent(0, keysym);
         }
     }
+
+    // ARGV: guacd streams the current connection argument values (color-scheme,
+    // font-name, font-size, …). Without an onargv handler, guacamole-common-js
+    // NAKs each stream with "Receiving argument values unsupported" (status 256) —
+    // a protocol error the native senhasegura client does not produce. Accept and
+    // drain the streams so the handshake matches native behavior. We don't need
+    // the values, but consuming the stream avoids the rejection.
+    guac.onargv = function(stream, mimetype, name) {
+        var reader = new Guacamole.StringReader(stream);
+        reader.ontext = function() { /* consume */ };
+        reader.onend = function() { /* stream fully read & acked */ };
+    };
 
     // COPY: remote clipboard -> browser clipboard
     guac.onclipboard = function(stream, mimetype) {
