@@ -30,8 +30,11 @@ Generic stale-while-revalidate cache in `internal/credcache/` (no import cycle):
 ---
 
 ## Known issues / to investigate
-- **Web terminal — stray `////` that self-heals** (reported by user). Appears on the web terminal **without opening vim and without any user action** (at idle / on connect), then repairs itself. Likely an escape-sequence / guacd rendering artifact on the web path.
-  - Need: a screenshot of the artifact (the one the user tried to attach didn't come through) + a `SEGURA_DEBUG_WS=1` capture while it happens, to see the frames. Do NOT guess a fix — capture first (règle #0).
+- **Web terminal — stray `////` that self-heals** (reported by user). Appears at idle/on-connect, then repairs itself.
+  - **Investigation done (this session):** reproduced the full web session headlessly (headless Chrome CAN reach localhost, the extension browser cannot). Captured: `SEGURA_DEBUG_WS` frames + 1 idle screenshot (40s) + 10 burst screenshots across the connect/render window + a zoom on the right edge.
+  - **Findings:** terminal renders **cleanly every time** (AWS design fine, bash prompt fine) — **the `////` did NOT reproduce**. guacd renders the terminal as PNG tiles server-side; the frontend sends **no stray key events** (only ping/nop/ack). The only protocol oddity is `ack ... "Receiving argument values unsupported",256` = frontend `guacamole-common-js` 1.5.0 doesn't set `client.onargv`, so it rejects guacd's arg-value stream — **benign** (metadata, not the display). Right-edge element = just the scrollbar.
+  - **Blocked (règle #0):** can't diagnose/fix an artifact I can't see; a blind fix would risk breaking the working terminal.
+  - **Need from user:** (1) a screenshot of the `////` when it appears; (2) the `~/.segura/ws-debug.log` captured at that moment (`SEGURA_DEBUG_WS=1 ./segura web --port 8080`); (3) context — where on screen, when (immediately / after N min idle / on resize / after a specific command), what it looks like exactly.
 
 ---
 
