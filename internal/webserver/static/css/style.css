@@ -444,3 +444,21 @@ body.fm-open #display:has(~ #file-manager.fm-fullscreen) { right: 100%; }
 .fm-modal-btn.primary:hover { background: var(--ss-primary-dark); border-color: var(--ss-primary-dark); }
 .fm-modal-btn.primary.danger { background: var(--danger); border-color: var(--danger); }
 .fm-modal-btn.primary.danger:hover { background: #c23c2c; border-color: #c23c2c; }
+
+/* Paste fallback modal */
+#paste-modal {
+    position: fixed; inset: 0; z-index: 410; display: none;
+    align-items: center; justify-content: center;
+    background: rgba(6,20,18,.55); backdrop-filter: blur(2px);
+}
+#paste-modal.open { display: flex; }
+#paste-modal-input {
+    width: 100%; min-height: 120px; resize: vertical;
+    font-family: var(--font-mono); font-size: 13px;
+    padding: 10px 12px; border: 1px solid var(--term-border); border-radius: 8px;
+    background: var(--term-bg); color: var(--term-text); outline: none; margin-bottom: 16px;
+}
+#paste-modal-input::placeholder { color: #4d7873; }
+#paste-modal-input:focus { border-color: var(--ss-primary-2); box-shadow: 0 0 0 2px rgba(0,135,133,.3); }
+/* the terminal right-click menu reuses .fm-ctx styling */
+#term-ctx { min-width: 170px; }

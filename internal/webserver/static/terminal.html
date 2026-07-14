@@ -153,6 +153,24 @@
         <div class="fm-ctx-item" data-action="selectall">&#x2611; Select all</div>
     </div>
 
+    <!-- Terminal right-click menu (copy / paste) -->
+    <div class="fm-ctx" id="term-ctx">
+        <div class="fm-ctx-item" data-tact="copy">&#x2398; Copy selection</div>
+        <div class="fm-ctx-item" data-tact="paste">&#x1F4CB; Paste</div>
+    </div>
+
+    <!-- Paste fallback modal (reliable on every browser) -->
+    <div id="paste-modal" class="paste-modal">
+        <div class="fm-modal-box" style="width:min(92vw,500px);">
+            <div class="fm-modal-title">Paste into terminal</div>
+            <textarea id="paste-modal-input" spellcheck="false" placeholder="Press Cmd/Ctrl+V here to paste, then Send"></textarea>
+            <div class="fm-modal-actions">
+                <button class="fm-modal-btn" id="paste-modal-cancel">Cancel</button>
+                <button class="fm-modal-btn primary" id="paste-modal-send">Send to terminal</button>
+            </div>
+        </div>
+    </div>
+
     <!-- Prompt / confirm modal -->
     <div id="fm-modal">
         <div class="fm-modal-box">

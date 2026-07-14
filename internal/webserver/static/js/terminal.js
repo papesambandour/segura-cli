@@ -1453,34 +1453,25 @@
 
     var keyboard = new Guacamole.Keyboard(document);
 
-    // Track modifier state
-    var ctrlPressed = false;
+    // Track Ctrl / Cmd(Meta) / Shift separately.
+    var ctrlPressed = false, metaPressed = false, shiftPressed = false;
 
     keyboard.onkeydown = function(keysym) {
-        // Track Ctrl press
-        if (keysym === 0xFFE3 || keysym === 0xFFE4) {
-            ctrlPressed = true;
-            guac.sendKeyEvent(1, keysym);
-            return true;
-        }
-        // Track Meta (Cmd on Mac)
-        if (keysym === 0xFFE7 || keysym === 0xFFE8) {
-            ctrlPressed = true;
-            guac.sendKeyEvent(1, keysym);
-            return true;
-        }
+        if (keysym === 0xFFE3 || keysym === 0xFFE4) { ctrlPressed = true; guac.sendKeyEvent(1, keysym); return true; }
+        if (keysym === 0xFFE7 || keysym === 0xFFE8) { metaPressed = true; guac.sendKeyEvent(1, keysym); return true; }
+        if (keysym === 0xFFE1 || keysym === 0xFFE2) { shiftPressed = true; guac.sendKeyEvent(1, keysym); return true; }
 
-        // Block Ctrl+C, Ctrl+V, Ctrl+A, Ctrl+X from being sent to remote
-        // Let the browser handle these for clipboard and selection
-        if (ctrlPressed) {
-            // c=0x63, C=0x43, v=0x76, V=0x56, a=0x61, A=0x41, x=0x78, X=0x58
-            if (keysym === 0x63 || keysym === 0x43 ||  // Ctrl+C
-                keysym === 0x76 || keysym === 0x56 ||  // Ctrl+V
-                keysym === 0x61 || keysym === 0x41 ||  // Ctrl+A
-                keysym === 0x78 || keysym === 0x58) {  // Ctrl+X
-                // Don't send to remote — let browser handle natively
-                return false;
-            }
+        // Clipboard/selection combos are handled by the browser (via the hidden
+        // textarea), NOT forwarded to the remote:
+        //   • Cmd+C / Cmd+V / Cmd+X / Cmd+A  (macOS)
+        //   • Ctrl+Shift+C / …             (Linux/Windows terminal convention)
+        // Plain Ctrl+C stays a terminal key, so it still sends SIGINT (interrupt).
+        var clipKey = (keysym === 0x63 || keysym === 0x43 ||  // c C
+                       keysym === 0x76 || keysym === 0x56 ||  // v V
+                       keysym === 0x61 || keysym === 0x41 ||  // a A
+                       keysym === 0x78 || keysym === 0x58);   // x X
+        if (clipKey && (metaPressed || (ctrlPressed && shiftPressed))) {
+            return false;
         }
 
         guac.sendKeyEvent(1, keysym);
@@ -1488,11 +1479,9 @@
     };
 
     keyboard.onkeyup = function(keysym) {
-        // Track Ctrl/Meta release
-        if (keysym === 0xFFE3 || keysym === 0xFFE4 ||
-            keysym === 0xFFE7 || keysym === 0xFFE8) {
-            ctrlPressed = false;
-        }
+        if (keysym === 0xFFE3 || keysym === 0xFFE4) ctrlPressed = false;
+        if (keysym === 0xFFE7 || keysym === 0xFFE8) metaPressed = false;
+        if (keysym === 0xFFE1 || keysym === 0xFFE2) shiftPressed = false;
         guac.sendKeyEvent(0, keysym);
     };
 
@@ -1503,7 +1492,7 @@
     // loses focus or is hidden clears any such stuck key.
     function releaseAllKeys() {
         try { keyboard.reset(); } catch (e) {}
-        ctrlPressed = false;
+        ctrlPressed = false; metaPressed = false; shiftPressed = false;
     }
     window.addEventListener('blur', releaseAllKeys);
     document.addEventListener('visibilitychange', function() {
@@ -1575,6 +1564,60 @@
     }
     // Fallback: some browsers do fire paste on the document itself.
     document.addEventListener('paste', handlePaste);
+
+    // ---- Terminal right-click menu (Copy / Paste) + reliable paste modal ----
+    var lastSelection = '';   // updated by guac.onclipboard on terminal selection
+    var termCtx = document.getElementById('term-ctx');
+    var displayEl = document.getElementById('display');
+
+    function doCopy() {
+        var text = lastSelection || (clip && clip.value) || '';
+        if (text) copyToClipboard(text);
+        else showToast('Select text in the terminal first');
+    }
+    function doPaste() {
+        // Try the async clipboard (Chrome, with permission); otherwise open a modal
+        // where the user pastes manually — reliable on every browser incl. Firefox.
+        if (navigator.clipboard && navigator.clipboard.readText) {
+            navigator.clipboard.readText().then(function(t) {
+                if (t) sendTextToTerminal(t); else openPasteModal();
+            }).catch(function() { openPasteModal(); });
+        } else {
+            openPasteModal();
+        }
+    }
+    function openPasteModal() {
+        var ov = document.getElementById('paste-modal');
+        var ta = document.getElementById('paste-modal-input');
+        var send = document.getElementById('paste-modal-send');
+        var cancel = document.getElementById('paste-modal-cancel');
+        ta.value = '';
+        ov.classList.add('open');
+        setTimeout(function() { ta.focus(); }, 30);
+        function close() { ov.classList.remove('open'); send.onclick = cancel.onclick = ov.onmousedown = ta.onkeydown = null; if (window.focusClip) window.focusClip(); }
+        send.onclick = function() { var t = ta.value; close(); if (t) sendTextToTerminal(t); };
+        cancel.onclick = close;
+        ov.onmousedown = function(e) { if (e.target === ov) close(); };
+        ta.onkeydown = function(e) { e.stopPropagation(); if (e.key === 'Escape') { e.preventDefault(); close(); } };
+    }
+    if (termCtx && displayEl) {
+        displayEl.addEventListener('contextmenu', function(e) {
+            e.preventDefault();
+            termCtx.style.left = Math.min(e.clientX, window.innerWidth - 190) + 'px';
+            termCtx.style.top = Math.min(e.clientY, window.innerHeight - 90) + 'px';
+            termCtx.classList.add('visible');
+        });
+        document.addEventListener('click', function() { termCtx.classList.remove('visible'); });
+        termCtx.addEventListener('click', function(e) {
+            var it = e.target.closest('.fm-ctx-item'); if (!it) return;
+            termCtx.classList.remove('visible');
+            var act = it.getAttribute('data-tact');
+            if (act === 'copy') doCopy();
+            else if (act === 'paste') doPaste();
+        });
+    }
+    window.termCopy = doCopy;
+    window.termPaste = doPaste;
 
     // Helper: send text char-by-char to remote terminal
     function sendTextToTerminal(text) {
@@ -1652,9 +1695,10 @@
             var data = '';
             reader.ontext = function(text) { data += text; };
             reader.onend = function() {
-                // A terminal selection just landed. Copy it to the system clipboard
-                // now (copy-on-select), and also stage it in the hidden field so a
-                // subsequent Cmd/Ctrl+C copies the same text.
+                // A terminal selection just landed. Remember it (for the right-click
+                // Copy), copy it to the system clipboard now (copy-on-select), and
+                // stage it in the hidden field so Cmd/Ctrl+C copies the same text.
+                lastSelection = data;
                 copyToClipboard(data);
                 if (clip) { clip.value = data; try { clip.select(); } catch (e) {} }
             };

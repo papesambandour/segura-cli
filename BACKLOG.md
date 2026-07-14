@@ -45,6 +45,10 @@ Generic stale-while-revalidate cache in `internal/credcache/` (no import cycle):
 - Validated headlessly: the textarea is auto-focused (`activeElement === clipboard-helper`) and a paste event on it delivers the text to the remote (key events in ws-debug.log).
 - Copy: `guac.onclipboard` (copy-on-select) → `navigator.clipboard.writeText` + `execCommand` fallback + "Copied" toast, and stages the text in the textarea so Cmd/Ctrl+C copies it too.
 - Side benefit: with focus on an editable element, "/" no longer triggers browser quick-find (reinforces the earlier stuck-key fix).
+- **Follow-up (shortcuts + right-click menu):**
+  - Fixed the shortcut mapping: track Ctrl/Cmd/Shift separately — **plain Ctrl+C now goes to the terminal (SIGINT)** again (was wrongly swallowed as "copy"); clipboard combos are only Cmd+C/V/X/A (macOS) and Ctrl+Shift+C/V (Linux/Windows).
+  - Added a **right-click menu on the terminal** (Copy selection / Paste), and a **paste fallback modal** (paste manually → Send) that works on every browser when `navigator.clipboard.readText` is blocked (Firefox). Copy uses the last terminal selection captured via `guac.onclipboard`.
+  - Validated headlessly: right-click menu shows; the paste modal delivers typed text to the remote (key events in ws-debug.log).
 
 ## (was) In progress — SFTP file manager: features + redesign
 Goal: richer, more accessible SFTP console in the web terminal.
