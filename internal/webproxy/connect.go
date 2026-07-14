@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os/exec"
 	"runtime"
+	"sync"
 
 	"segura-cli/internal/config"
 )
@@ -29,12 +30,10 @@ func ConnectBrowser(cfg *config.Config, credential, device string) error {
 	fmt.Println("Authentication successful.")
 
 	fmt.Println("Fetching available credentials...")
-	dashboardHTML, err := client.GetPage("/flow/coge/desktop/dashboard")
+	credentials, err := client.FetchAllCredentials()
 	if err != nil {
-		return fmt.Errorf("failed to fetch dashboard: %w", err)
+		return err
 	}
-
-	credentials := ParseCredentials(dashboardHTML)
 	if len(credentials) == 0 {
 		return fmt.Errorf("no credentials found on dashboard")
 	}
@@ -64,7 +63,92 @@ func ConnectBrowser(cfg *config.Config, credential, device string) error {
 	return openBrowser(proxyURL)
 }
 
-// ListCredentials authenticates and returns available credentials.
+const (
+	// maxCredentialPages is a safety backstop so the pagination loop can never
+	// spin forever if the server ever changes its end-of-list behavior.
+	maxCredentialPages = 1000
+	// credentialPageBatch is how many dashboard pages are fetched concurrently
+	// per round. Bounds both parallelism and the wasted empty-page fetches at
+	// the tail (at most credentialPageBatch-1 extra requests).
+	credentialPageBatch = 8
+)
+
+// FetchAllCredentials returns every credential across all dashboard pages.
+// The senhasegura dashboard paginates via ?page=N (verified against a live
+// instance): each page holds a fixed slice, and any page past the last — including
+// far-out-of-range values — returns an EMPTY list rather than clamping to page 1.
+// The page count isn't reliably known up front (the pagination control is
+// windowed), so pages are fetched in concurrent batches and the walk stops at
+// the first empty page (processed in page order). Results are de-duplicated
+// across pages by identity (username + ip + device).
+func (c *Client) FetchAllCredentials() ([]Credential, error) {
+	var all []Credential
+	seen := make(map[string]bool)
+
+	for start := 1; start <= maxCredentialPages; start += credentialPageBatch {
+		pages, err := c.fetchCredentialPages(start, credentialPageBatch)
+		if err != nil {
+			return nil, err
+		}
+
+		reachedEnd := false
+		for _, creds := range pages { // page order preserved
+			if len(creds) == 0 {
+				reachedEnd = true
+				break
+			}
+			for _, cr := range creds {
+				key := cr.Username + "@" + cr.IP + "|" + cr.Device
+				if !seen[key] {
+					seen[key] = true
+					all = append(all, cr)
+				}
+			}
+		}
+		if reachedEnd {
+			break
+		}
+	}
+
+	return all, nil
+}
+
+// fetchCredentialPages fetches `count` dashboard pages starting at `start`
+// concurrently and returns their parsed credentials in page order.
+func (c *Client) fetchCredentialPages(start, count int) ([][]Credential, error) {
+	pages := make([][]Credential, count)
+	errs := make([]error, count)
+
+	var wg sync.WaitGroup
+	for i := 0; i < count; i++ {
+		page := start + i
+		if page > maxCredentialPages {
+			continue // leaves pages[i] nil -> treated as an empty (end) page
+		}
+		wg.Add(1)
+		go func(i, page int) {
+			defer wg.Done()
+			html, err := c.GetPage(fmt.Sprintf("/flow/coge/desktop/dashboard?page=%d", page))
+			if err != nil {
+				errs[i] = fmt.Errorf("failed to fetch dashboard page %d: %w", page, err)
+				return
+			}
+			pages[i] = ParseCredentials(html)
+		}(i, page)
+	}
+	wg.Wait()
+
+	// Surface the earliest (lowest-page) error conservatively — we can't yet
+	// know which pages are past the real end.
+	for _, err := range errs {
+		if err != nil {
+			return nil, err
+		}
+	}
+	return pages, nil
+}
+
+// ListCredentials authenticates and returns all available credentials.
 func ListCredentials(cfg *config.Config) ([]Credential, error) {
 	client, err := NewClient(cfg)
 	if err != nil {
@@ -75,12 +159,7 @@ func ListCredentials(cfg *config.Config) ([]Credential, error) {
 		return nil, fmt.Errorf("authentication failed: %w", err)
 	}
 
-	dashboardHTML, err := client.GetPage("/flow/coge/desktop/dashboard")
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch dashboard: %w", err)
-	}
-
-	return ParseCredentials(dashboardHTML), nil
+	return client.FetchAllCredentials()
 }
 
 // openBrowser opens a URL in the default browser.

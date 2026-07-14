@@ -21,8 +21,10 @@ func CopyFile(cfg *config.Config, src, dest string, port int) error {
 		return fmt.Errorf("failed to generate TOTP: %w", err)
 	}
 
-	// Transform the remote path to senhasegura format
-	// Use -o User= to avoid macOS SSH % token expansion bug
+	// Transform the remote path to senhasegura format.
+	// The proxy username ends in "%tenant"; OpenSSH percent-expands -o User=
+	// values (e.g. "%y" -> "unknown key %y"), so the "%" must be escaped as
+	// "%%" (a literal percent per the ssh_config TOKENS spec) before use.
 	var sshUser string
 	srcUser, src, srcRemote := rewriteRemotePath(cfg, src, totp)
 	destUser, dest, destRemote := rewriteRemotePath(cfg, dest, totp)
@@ -37,7 +39,7 @@ func CopyFile(cfg *config.Config, src, dest string, port int) error {
 		"-o", "UserKnownHostsFile=/dev/null",
 		"-o", "LogLevel=ERROR",
 		"-o", "PubkeyAuthentication=no",
-		"-o", fmt.Sprintf("User=%s", sshUser),
+		"-o", fmt.Sprintf("User=%s", strings.ReplaceAll(sshUser, "%", "%%")),
 		"-P", fmt.Sprintf("%d", port),
 		src, dest,
 	}
@@ -66,7 +68,8 @@ func CopyFile(cfg *config.Config, src, dest string, port int) error {
 
 // rewriteRemotePath converts "credential@device:/path" to the senhasegura proxy format.
 // Returns: sshUser (for -o User=), remotePath (host:/path), isRemote.
-// Using -o User= avoids the % token expansion bug on newer macOS SSH clients.
+// sshUser contains a raw "%tenant" suffix; the caller must escape "%" -> "%%"
+// before passing it to scp -o User=, since OpenSSH percent-expands that value.
 func rewriteRemotePath(cfg *config.Config, path string, totp string) (sshUser string, rewritten string, isRemote bool) {
 	atIdx := strings.Index(path, "@")
 	colonIdx := strings.Index(path, ":")

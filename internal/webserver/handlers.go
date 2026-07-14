@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
-
-	"segura-cli/internal/webproxy"
 )
 
 // handleCredentials returns the list of available credentials as JSON.
@@ -17,14 +15,12 @@ func (s *Server) handleCredentials(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	dashboardHTML, err := client.GetPage("/flow/coge/desktop/dashboard")
+	credentials, err := client.FetchAllCredentials()
 	if err != nil {
 		log.Printf("Dashboard error: %v", err)
 		http.Error(w, `{"error":"failed to fetch dashboard"}`, http.StatusInternalServerError)
 		return
 	}
-
-	credentials := webproxy.ParseCredentials(dashboardHTML)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(credentials)
