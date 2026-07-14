@@ -1466,12 +1466,20 @@
         //   • Cmd+C / Cmd+V / Cmd+X / Cmd+A  (macOS)
         //   • Ctrl+Shift+C / …             (Linux/Windows terminal convention)
         // Plain Ctrl+C stays a terminal key, so it still sends SIGINT (interrupt).
+        //
+        // Guacamole.Keyboard convention (verified in guacamole-common.min.js):
+        // onkeydown must return TRUE to *allow the event through* to the browser
+        // (Guacamole does NOT preventDefault), and FALSE to *block* it (Guacamole
+        // DOES preventDefault, via `defaultPrevented = !press()`). Returning false
+        // here would preventDefault the Cmd/Ctrl+V keydown and SUPPRESS the native
+        // `paste` event — which is exactly why paste used to fail. Return true so
+        // the browser fires the real copy/paste on the focused hidden textarea.
         var clipKey = (keysym === 0x63 || keysym === 0x43 ||  // c C
                        keysym === 0x76 || keysym === 0x56 ||  // v V
                        keysym === 0x61 || keysym === 0x41 ||  // a A
                        keysym === 0x78 || keysym === 0x58);   // x X
         if (clipKey && (metaPressed || (ctrlPressed && shiftPressed))) {
-            return false;
+            return true;   // let the browser perform the clipboard action (do NOT send to remote)
         }
 
         guac.sendKeyEvent(1, keysym);
@@ -1522,17 +1530,25 @@
 
     // PASTE — cross-browser (Chrome + Firefox). The reliable, permission-free way
     // to read the clipboard is the browser's native "paste" event (fired by both
-    // Ctrl/Cmd+V and right-click > Paste). We deliberately do NOT preventDefault the
-    // Ctrl/Cmd+V keydown: doing so suppresses that native paste event and forces a
-    // fallback to navigator.clipboard.readText(), which is blocked on Firefox and
-    // needs a permission prompt on Chrome. Guacamole already leaves Ctrl+V to the
-    // browser (its onkeydown returns false for it), so the paste event fires here.
+    // Ctrl/Cmd+V and right-click > Paste) on the focused hidden textarea. For that
+    // event to fire, the Ctrl/Cmd+V keydown must NOT be preventDefault-ed — and
+    // Guacamole.Keyboard preventDefaults whenever onkeydown returns false. That is
+    // why the keydown handler above returns TRUE for clipboard combos (see the note
+    // there): true = "allow through to the browser" in Guacamole's inverted convention,
+    // so the browser fires the real paste here.
     var clip = document.getElementById('clipboard-helper');
     function handlePaste(e) {
         var cd = e.clipboardData || window.clipboardData;
         if (!cd) return;
         var text = cd.getData('text/plain') || cd.getData('text') || '';
-        if (text) { e.preventDefault(); sendTextToTerminal(text); }
+        if (text) {
+            // Stop here so the same event doesn't ALSO reach the document-level
+            // fallback listener below (paste on the textarea bubbles to document),
+            // which would send the text twice.
+            e.preventDefault();
+            e.stopPropagation();
+            sendTextToTerminal(text);
+        }
         if (clip) clip.value = '';
     }
     if (clip) {
