@@ -57,6 +57,16 @@ func CopyFile(cfg *config.Config, src, dest string, port int, recursive bool) er
 	if recursive {
 		scpArgs = append(scpArgs, "-r")
 	}
+	// Directory UPLOADS need the legacy SCP protocol (-O): OpenSSH 9+ defaults to
+	// SFTP, which realpath-canonicalizes the remote target first and fails
+	// ("path canonicalization failed") when the destination dir does not exist
+	// yet; the legacy protocol creates it like classic scp. Restrict -O to
+	// uploads: for DOWNLOADS the legacy protocol breaks ("expected control
+	// record") because the senhasegura proxy injects banner text into the SCP
+	// stream, so downloads must use the default SFTP protocol.
+	if recursive && destRemote {
+		scpArgs = append(scpArgs, "-O")
+	}
 	scpArgs = append(scpArgs, src, dest)
 
 	var cmd *exec.Cmd
