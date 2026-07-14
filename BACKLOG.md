@@ -29,12 +29,20 @@ Generic stale-while-revalidate cache in `internal/credcache/` (no import cycle):
 
 ---
 
+## Resolved
+- **Web terminal — runaway `////` (stuck key)** — ✅ ROOT CAUSE FOUND & FIXED.
+  - **Proof (ws-debug.log):** `/` = keysym 47 was sent **264×** (press+release pairs) over **~147 s** at ~1/s — nobody holds a key that long → the key was *stuck*. User confirmed: pressing `/` opened the **browser's quick-find** (e.g. Firefox `/`), stealing focus; the `/` **key-up went to the browser chrome, not Guacamole**, so Guacamole thought `/` was still held and repeated it forever.
+  - **Fix (`terminal.js`, like the CLI — at the source):** (1) `keyboard.reset()` on `window blur` + `visibilitychange(hidden)` → releases every key the moment focus leaves the terminal, clearing any stuck key (covers `/` and any "other key" that steals focus). (2) `preventDefault` on `/`, `'`, `Backspace` (when not in an input / no modifier) so the browser can't hijack them and steal focus in the first place; Guacamole still sends them to the terminal.
+  - **Validated:** JS valid; terminal renders + works (screenshot, no regression); blur/visibility handlers run with **no exception**; the only console error is a pre-existing benign `module is not defined` in guacamole-common.min.js (CJS build). Real-world confirmation (press `/`, types normally + no runaway) is for the user to tick off.
+  - Also fixed the protocol NAK (`Receiving argument values unsupported`) by adding `guac.onargv` — matches native; separate from the `////` root cause but a real cleanup.
+
 ## Known issues / to investigate
-- **Web terminal — stray `////` that self-heals** (reported by user). Appears at idle/on-connect, then repairs itself.
+- *(none open)*
   - **Investigation done (this session):** reproduced the full web session headlessly (headless Chrome CAN reach localhost, the extension browser cannot). Captured: `SEGURA_DEBUG_WS` frames + 1 idle screenshot (40s) + 10 burst screenshots across the connect/render window + a zoom on the right edge.
   - **Findings:** terminal renders **cleanly every time** (AWS design fine, bash prompt fine) — **the `////` did NOT reproduce**. guacd renders the terminal as PNG tiles server-side; the frontend sends **no stray key events** (only ping/nop/ack). The only protocol oddity is `ack ... "Receiving argument values unsupported",256` = frontend `guacamole-common-js` 1.5.0 doesn't set `client.onargv`, so it rejects guacd's arg-value stream — **benign** (metadata, not the display). Right-edge element = just the scrollbar.
-  - **Blocked (règle #0):** can't diagnose/fix an artifact I can't see; a blind fix would risk breaking the working terminal.
-  - **Need from user:** (1) a screenshot of the `////` when it appears; (2) the `~/.segura/ws-debug.log` captured at that moment (`SEGURA_DEBUG_WS=1 ./segura web --port 8080`); (3) context — where on screen, when (immediately / after N min idle / on resize / after a specific command), what it looks like exactly.
+  - **Fix applied (protocol difference from native):** the one measured difference between segura (broken) and native (works) was that segura's frontend NAKed guacd's `argv` streams (`Receiving argument values unsupported`, status 256) because `terminal.js` had no `guac.onargv` handler. Added one that accepts + drains the streams. Verified in a fresh capture: the NAK count went **6 → 0**; the browser now `ack,1.1,OK` the argv streams like native.
+  - **Honest status:** this removes the only protocol-level anomaly, but the `////` is a *pixel* artifact (guacd renders the terminal as PNG tiles) so it never appeared in the protocol log, and it did **not** reproduce in ~12 headless captures. So I can't prove this fixes the visual `////`.
+  - **To confirm / if still present:** user reproduces the scenario and checks whether `////` is gone; if not, a **screenshot of the artifact** is the key missing piece (protocol logs can't show a client-side render glitch). Possible next lead if it persists: the bundled `guacamole-common-js` (1.5.0) render vs the version native uses.
 
 ---
 
