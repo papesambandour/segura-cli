@@ -4,21 +4,24 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+
+	"segura-cli/internal/webproxy"
 )
 
-// handleCredentials returns the list of available credentials as JSON.
+// handleCredentials returns the list of available credentials as JSON,
+// cache-first. Pass ?refresh=1 to force a live re-fetch (used by the Refresh
+// button).
 func (s *Server) handleCredentials(w http.ResponseWriter, r *http.Request) {
-	client, err := s.sm.GetClient()
-	if err != nil {
-		log.Printf("Auth error: %v", err)
-		http.Error(w, `{"error":"authentication failed"}`, http.StatusInternalServerError)
-		return
+	var credentials []webproxy.Credential
+	var err error
+	if r.URL.Query().Get("refresh") != "" {
+		credentials, err = s.sm.RefreshCredentials()
+	} else {
+		credentials, err = s.sm.GetCredentials()
 	}
-
-	credentials, err := client.FetchAllCredentials()
 	if err != nil {
-		log.Printf("Dashboard error: %v", err)
-		http.Error(w, `{"error":"failed to fetch dashboard"}`, http.StatusInternalServerError)
+		log.Printf("Credentials error: %v", err)
+		http.Error(w, `{"error":"failed to fetch credentials"}`, http.StatusInternalServerError)
 		return
 	}
 

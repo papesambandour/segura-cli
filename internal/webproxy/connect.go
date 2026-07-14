@@ -2,12 +2,56 @@ package webproxy
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
+	"time"
 
 	"segura-cli/internal/config"
+	"segura-cli/internal/credcache"
 )
+
+// cliCacheTTL is how long the CLI serves the on-disk credential list without a
+// live re-fetch. Short-lived CLI processes can't run a background refresh, so a
+// modest TTL keeps `segura list` instant on repeat calls while staying current.
+const cliCacheTTL = 3 * time.Minute
+
+// credentialCache returns a disk-backed cache for the credential list, keyed by
+// host+user so different instances/accounts don't share a cache file.
+func credentialCache(cfg *config.Config) *credcache.Cache[Credential] {
+	fetch := func() ([]Credential, error) {
+		client, err := NewClient(cfg)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create client: %w", err)
+		}
+		if err := client.Login(); err != nil {
+			return nil, fmt.Errorf("authentication failed: %w", err)
+		}
+		return client.FetchAllCredentials()
+	}
+	return credcache.New(fetch, cliCacheTTL, cliCacheTTL, cliCachePath(cfg))
+}
+
+func cliCachePath(cfg *config.Config) string {
+	dir := filepath.Join(os.Getenv("HOME"), ".segura")
+	_ = os.MkdirAll(dir, 0o755)
+	return filepath.Join(dir, "creds-"+slug(cfg.Host+"-"+cfg.User)+".json")
+}
+
+func slug(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('_')
+		}
+	}
+	return b.String()
+}
 
 // Connect authenticates to senhasegura and opens a terminal session.
 // It uses the Guacamole WebSocket protocol to provide an interactive terminal.
@@ -148,18 +192,17 @@ func (c *Client) fetchCredentialPages(start, count int) ([][]Credential, error) 
 	return pages, nil
 }
 
-// ListCredentials authenticates and returns all available credentials.
+// ListCredentials returns all available credentials, cache-first: a fresh
+// on-disk cache is served instantly (skipping the slow login + dashboard fetch);
+// otherwise it authenticates and fetches live, updating the cache.
 func ListCredentials(cfg *config.Config) ([]Credential, error) {
-	client, err := NewClient(cfg)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create client: %w", err)
-	}
+	creds, _, err := credentialCache(cfg).Get()
+	return creds, err
+}
 
-	if err := client.Login(); err != nil {
-		return nil, fmt.Errorf("authentication failed: %w", err)
-	}
-
-	return client.FetchAllCredentials()
+// ListCredentialsRefresh bypasses the cache, fetches live, and updates the cache.
+func ListCredentialsRefresh(cfg *config.Config) ([]Credential, error) {
+	return credentialCache(cfg).Refresh()
 }
 
 // openBrowser opens a URL in the default browser.

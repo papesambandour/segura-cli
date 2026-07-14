@@ -4,6 +4,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SEGURA - Dashboard</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+    <link rel="alternate icon" href="/favicon-32.png">
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png">
     <link rel="stylesheet" href="/css/style.css">
 </head>
 <body>
@@ -14,13 +17,22 @@
         </div>
         <div class="header-actions">
             <span id="status" class="status-badge">Connecting...</span>
-            <button id="refreshBtn" class="btn btn-sm" onclick="loadCredentials()">Refresh</button>
+            <button id="refreshBtn" class="btn btn-sm" onclick="loadCredentials(true)">Refresh</button>
         </div>
     </header>
     <main>
+        <div class="dash-head">
+            <div class="dash-title">
+                <h2>Privileged sessions</h2>
+                <div class="count" id="credCount">Loading available credentials…</div>
+            </div>
+            <div class="dash-filter">
+                <input type="text" id="credFilter" placeholder="Filter by user, device or IP" spellcheck="false" autocomplete="off">
+            </div>
+        </div>
         <div id="loading" class="loading">
             <div class="spinner"></div>
-            <p>Authenticating to senhasegura...</p>
+            <p>Authenticating to senhasegura…</p>
         </div>
         <div id="error" class="error-box" style="display:none"></div>
         <div id="credentials" class="credentials-grid"></div>

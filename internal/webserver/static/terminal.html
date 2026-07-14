@@ -4,37 +4,56 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SEGURA - Terminal</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+    <link rel="alternate icon" href="/favicon-32.png">
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png">
     <link rel="stylesheet" href="/css/style.css">
     <style>
-        body { margin: 0; padding: 0; overflow: hidden; background: #000; }
+        body { margin: 0; padding: 0; overflow: hidden; background: #0b1520; }
         #toolbar {
             position: fixed; top: 0; left: 0; right: 0; z-index: 100;
-            background: rgba(30, 30, 30, 0.95); padding: 8px 16px;
-            display: flex; align-items: center; gap: 12px;
-            border-bottom: 1px solid #333; backdrop-filter: blur(8px);
+            background: #232f3e; padding: 0 16px; height: 48px;
+            display: flex; align-items: center; gap: 10px;
+            border-bottom: 2px solid #ff9900;
         }
-        #toolbar .info { color: #4fc3f7; font-family: monospace; font-size: 14px; flex: 1; }
-        #toolbar .btn { padding: 6px 14px; font-size: 13px; }
+        #toolbar .brand {
+            font-weight: 700; letter-spacing: 2.5px; color: #fff; font-size: 15px;
+            display: flex; align-items: center; gap: 9px; padding-right: 4px;
+        }
+        #toolbar .brand::before {
+            content: ""; width: 11px; height: 11px; background: #ff9900;
+            border-radius: 2px; transform: rotate(45deg);
+        }
+        #toolbar .divider { width: 1px; height: 22px; background: rgba(255,255,255,.2); }
+        #toolbar .info {
+            color: #7ce38b; font-family: "SF Mono", Menlo, Monaco, monospace; font-size: 13px; flex: 1;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        }
+        #toolbar .info::before { content: "\25CF "; color: #2bc84a; font-size: 10px; }
+        #toolbar .btn { padding: 7px 15px; font-size: 12.5px; }
         #display {
-            position: fixed; top: 42px; left: 0; right: 0; bottom: 0;
-            overflow: hidden; cursor: default;
+            position: fixed; top: 48px; left: 0; right: 0; bottom: 0;
+            overflow: hidden; cursor: default; background: #000;
         }
         #display canvas { position: absolute; top: 0; left: 0; }
         #status-overlay {
             position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
-            background: rgba(0,0,0,0.85); color: #fff; padding: 24px 36px;
-            border-radius: 8px; font-size: 18px; display: none; z-index: 200;
-            text-align: center;
+            background: #1b2836; color: #e9ebed; padding: 26px 40px;
+            border: 1px solid #33445a; border-top: 3px solid #ff9900;
+            border-radius: 10px; font-size: 16px; display: none; z-index: 200;
+            text-align: center; box-shadow: 0 12px 40px rgba(0,0,0,.5);
         }
-        #status-overlay .spinner { margin: 12px auto; }
+        #status-overlay .spinner { margin: 4px auto 14px; border-top-color: #ff9900; }
     </style>
 </head>
 <body>
     <div id="toolbar">
-        <span class="info" id="connInfo">Connecting...</span>
+        <span class="brand">SEGURA</span>
+        <span class="divider"></span>
+        <span class="info" id="connInfo">Connecting…</span>
         <button class="btn btn-secondary" id="file-manager-btn" onclick="toggleFileManager()">Files</button>
-        <button class="btn" onclick="disconnect()">Disconnect</button>
         <a href="/" class="btn btn-secondary">Dashboard</a>
+        <button class="btn" onclick="disconnect()">Disconnect</button>
     </div>
     <div id="display"></div>
 

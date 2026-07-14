@@ -27,6 +27,9 @@ func Start(cfg *config.Config, port int) error {
 	sftpMgr := sftpclient.NewManager(cfg)
 	srv := &Server{cfg: cfg, sm: sm, sftpMgr: sftpMgr}
 
+	// Warm the credential cache in the background so the first dashboard load is instant.
+	sm.WarmCredentials()
+
 	mux := http.NewServeMux()
 
 	// API routes
