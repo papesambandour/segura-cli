@@ -6,7 +6,10 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 
@@ -45,12 +48,17 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 	defer browserConn.Close()
 
+	dbg := newWSDebugger()
+	defer dbg.close()
+	dbg.log("info", []byte(fmt.Sprintf("WS upgraded for %s@%s, authenticating...", username, ip)))
+
 	log.Printf("WS upgraded, authenticating for %s@%s...", username, ip)
 
 	// Authenticate and get credentials
 	upstream, err := s.connectUpstream(username, ip, width, height)
 	if err != nil {
 		log.Printf("WS upstream error: %v", err)
+		dbg.log("error", []byte("connectUpstream failed: "+err.Error()))
 		// Send Guacamole-protocol error so guacamole-common-js shows it
 		errMsg := fmt.Sprintf("5.error,%d.%s,3.519;", len(err.Error()), err.Error())
 		browserConn.WriteMessage(websocket.TextMessage, []byte(errMsg))
@@ -61,6 +69,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	defer upstream.Close()
 
 	log.Printf("WS proxy started: %s@%s", username, ip)
+	dbg.log("info", []byte("upstream connected; relay started"))
 
 	// Bidirectional relay
 	done := make(chan struct{})
@@ -69,7 +78,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		log.Printf("WS proxy ended: %s@%s", username, ip)
 	}
 
-	// Browser → Upstream
+	// Browser → Upstream (this direction carries the browser's key/mouse events)
 	go func() {
 		defer once.Do(cleanup)
 		defer close(done)
@@ -79,6 +88,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 				log.Printf("WS browser read error: %v", err)
 				return
 			}
+			dbg.log("browser->upstream", msg)
 			if err := upstream.WriteMessage(msgType, msg); err != nil {
 				log.Printf("WS upstream write error: %v", err)
 				return
@@ -95,6 +105,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 				log.Printf("WS upstream read error: %v", err)
 				return
 			}
+			dbg.log("upstream->browser", msg)
 			if err := browserConn.WriteMessage(msgType, msg); err != nil {
 				log.Printf("WS browser write error: %v", err)
 				return
@@ -105,6 +116,51 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	<-done
 }
 
+// wsDebugger dumps the Guacamole-protocol frames of a web-terminal session to
+// $HOME/.segura/ws-debug.log when SEGURA_DEBUG_WS is set. It is a diagnostic aid
+// for the web "0 repeats / can't type" bug: the browser->upstream direction shows
+// whether the frontend is emitting runaway "key" instructions.
+type wsDebugger struct {
+	mu    sync.Mutex
+	f     *os.File
+	start time.Time
+}
+
+func newWSDebugger() *wsDebugger {
+	if os.Getenv("SEGURA_DEBUG_WS") == "" {
+		return nil
+	}
+	dir := filepath.Join(os.Getenv("HOME"), ".segura")
+	_ = os.MkdirAll(dir, 0o755)
+	path := filepath.Join(dir, "ws-debug.log")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		log.Printf("SEGURA_DEBUG_WS: cannot open %s: %v", path, err)
+		return nil
+	}
+	log.Printf("SEGURA_DEBUG_WS: logging web-terminal frames to %s", path)
+	return &wsDebugger{f: f, start: time.Now()}
+}
+
+func (d *wsDebugger) log(dir string, msg []byte) {
+	if d == nil {
+		return
+	}
+	s := string(msg)
+	if len(s) > 400 { // drawing ops can be huge; the key/mouse frames we care about are short
+		s = s[:400] + "…"
+	}
+	d.mu.Lock()
+	fmt.Fprintf(d.f, "%9.3f %-17s %s\n", time.Since(d.start).Seconds(), dir, s)
+	d.mu.Unlock()
+}
+
+func (d *wsDebugger) close() {
+	if d != nil && d.f != nil {
+		d.f.Close()
+	}
+}
+
 // connectUpstream authenticates and opens a WebSocket to the upstream Guacamole server.
 func (s *Server) connectUpstream(username, ip, width, height string) (*websocket.Conn, error) {
 	client, err := s.sm.GetClient()
@@ -112,12 +168,11 @@ func (s *Server) connectUpstream(username, ip, width, height string) (*websocket
 		return nil, fmt.Errorf("authentication failed: %w", err)
 	}
 
-	dashboardHTML, err := client.GetPage("/flow/coge/desktop/dashboard")
+	credentials, err := client.FetchAllCredentials()
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch dashboard: %w", err)
+		return nil, fmt.Errorf("failed to fetch credentials: %w", err)
 	}
 
-	credentials := webproxy.ParseCredentials(dashboardHTML)
 	cred := webproxy.FindCredential(credentials, username, ip)
 	if cred == nil {
 		return nil, fmt.Errorf("credential %s@%s not found", username, ip)

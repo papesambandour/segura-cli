@@ -100,12 +100,10 @@ func ConnectAndRun(cfg *config.Config, credential, device string) error {
 	}
 	fmt.Println("Authentication successful.")
 
-	dashboardHTML, err := client.GetPage("/flow/coge/desktop/dashboard")
+	credentials, err := client.FetchAllCredentials()
 	if err != nil {
-		return fmt.Errorf("failed to fetch dashboard: %w", err)
+		return err
 	}
-
-	credentials := ParseCredentials(dashboardHTML)
 	if len(credentials) == 0 {
 		return fmt.Errorf("no credentials found")
 	}
