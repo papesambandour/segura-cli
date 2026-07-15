@@ -1636,7 +1636,22 @@
     window.termPaste = doPaste;
 
     // Helper: send text char-by-char to remote terminal
+    // Modifier keysyms (Shift/Ctrl/Meta/Alt, left & right).
+    var MODIFIER_KEYSYMS = [0xFFE1, 0xFFE2, 0xFFE3, 0xFFE4, 0xFFE7, 0xFFE8, 0xFFE9, 0xFFEA];
+
     function sendTextToTerminal(text) {
+        // A paste shortcut (Cmd+V on macOS, Ctrl+Shift+V on Linux/Windows) keeps
+        // its modifier key physically held while this runs, and we already sent
+        // that modifier "down" to the remote. If we injected the pasted text now,
+        // every character would arrive as Meta+char / Ctrl+char and be eaten by the
+        // shell's key bindings — e.g. readline treats Meta+c as "capitalize-word",
+        // so the "c" never appears. Release every modifier on the remote first so
+        // the pasted text lands as plain, literal characters.
+        for (var m = 0; m < MODIFIER_KEYSYMS.length; m++) {
+            guac.sendKeyEvent(0, MODIFIER_KEYSYMS[m]);
+        }
+        ctrlPressed = false; metaPressed = false; shiftPressed = false;
+
         for (var i = 0; i < text.length; i++) {
             var charCode = text.charCodeAt(i);
             var keysym;
