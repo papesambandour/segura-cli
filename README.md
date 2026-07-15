@@ -2,7 +2,9 @@
 
 A CLI + web app for connecting to remote devices through the **senhasegura PAM** (Privileged Access Management) platform.
 
-SSH terminal, browser-based terminal, SCP file transfer, SFTP file manager — all through your PAM gateway.
+SSH terminal, an interactive fuzzy picker, SCP/SFTP file transfer, a multi-tab
+browser terminal, local port-forwarding, and native `ssh`/`scp`/`rsync` support —
+all through your PAM gateway.
 
 ![SEGURA Demo](docs/screenshots/segura-demo.gif)
 
@@ -106,13 +108,94 @@ Direct SSH connection through the senhasegura gateway. TOTP and password are sen
 segura connect root@10.0.4.52 --port 2222
 ```
 
-### Browser Terminal
+### Interactive picker, recents & favorites
+
+Run `connect` with **no argument** to open a fuzzy picker of all your
+credentials — type to filter by user/device/IP, `Enter` to connect. Favorites
+(★) and recently-used (•) targets are listed first.
+
+```bash
+segura connect            # interactive picker
+segura connect web        # picker pre-filtered by "web"
+
+segura recent             # pick from recent/favorite targets to reconnect
+segura recent --list      # just print them
+
+segura fav add root@10.0.4.52   # pin a favorite
+segura fav                       # list favorites
+segura fav rm root@10.0.4.52     # unpin
+```
+
+Recents/favorites are stored in `~/.segura/recent.json`.
+
+### Browser Terminal (multi-tab)
 
 ```bash
 segura connect root@10.0.4.52 --browser
 ```
 
-Opens a local web terminal in your default browser. Auto-starts the web server daemon if needed.
+Opens a local **multi-tab web console** in your default browser (auto-starts the
+web server daemon if needed). Use the **＋** button (or `Ctrl/Cmd+T`) to open more
+servers as tabs in the same window; each tab is an isolated session and closing a
+tab tears down its connection.
+
+### Interactive SFTP browser
+
+```bash
+segura sftp root@10.0.4.52
+```
+
+A terminal file browser over SFTP — no web app needed. Commands inside the prompt:
+
+```
+ls [path]   ll [path]   cd <path>   pwd
+get <remote> [local]    put <local> [remote]    cat <file>
+mkdir <path>   rm <path>   mv <old> <new>
+lcd <dir>   lpwd   lls        help   exit
+```
+
+`put`/`mkdir`/`rm`/`mv` retry with sudo automatically on permission-denied. Run a
+single command non-interactively with `-c`:
+
+```bash
+segura sftp root@10.0.4.52 -c "get /etc/hosts ./hosts"
+```
+
+### Port forwarding
+
+Forward a local port to a service reachable from the device (databases, admin
+UIs, any TCP service on the device's loopback), tunneled through the gateway:
+
+```bash
+# Expose the device's MySQL/MariaDB locally on 3306
+segura forward -L 3306:127.0.0.1:3306 dbuser@SRV-DB1
+
+# Local 8080 -> the device's web admin on 80
+segura forward -L 8080:127.0.0.1:80 admin@SRV-WEB1
+```
+
+Runs until `Ctrl-C`. The tunnel is scoped to the device's own network, so target
+`127.0.0.1` to reach services bound there.
+
+### Native ssh / scp / rsync (ssh-config)
+
+Generate `~/.ssh/config` entries that route native `ssh`/`scp`/`rsync`/`git`/VS
+Code Remote to your devices through the gateway:
+
+```bash
+segura ssh-config           # print the entries
+segura ssh-config --write   # append/update them in ~/.ssh/config
+
+# then, natively:
+ssh segura-srv-web-root
+scp file.txt segura-srv-web-root:/tmp/
+```
+
+> **Note:** the tunnel gives native `ssh` a raw connection to the device's SSH
+> server — you then authenticate to the **device** with your own key or password.
+> segura injects the vault credential for its *own* sessions (`connect`, `sftp`),
+> not for the native client, so this is most useful where you have key-based
+> access to devices.
 
 ### SCP File Transfer
 
@@ -205,7 +288,7 @@ Then open `http://localhost:8080` in your browser.
 
 ### Dashboard
 
-The dashboard shows all available PAM credentials. Click one to open a terminal session.
+The dashboard shows all available PAM credentials. Click one to open a multi-tab terminal console.
 
 ![Dashboard](docs/screenshots/dashboard.gif)
 
@@ -225,9 +308,15 @@ Browse, upload, download, and edit remote files. Supports sudo for permission-re
 
 ## Web Terminal Features
 
+### Multi-tab console
+- Multiple server sessions as tabs in one browser window
+- **＋** button or **Ctrl/Cmd+T** to open another server (fuzzy picker)
+- Each tab is an isolated session; closing a tab tears down its connection
+
 ### Terminal
 - Full Guacamole terminal rendered in the browser
-- **Ctrl+C / Ctrl+V** — native copy/paste (text sent char-by-char to remote)
+- **Cmd+C / Cmd+V** (macOS) and **Ctrl+Shift+C / Ctrl+Shift+V** (Linux/Windows) — native copy/paste; plain **Ctrl+C** still sends SIGINT to the remote
+- Right-click menu (Copy / Paste) + a paste fallback that works on every browser
 - **Ctrl+A** — select all works in browser
 
 ### SFTP File Manager
@@ -273,4 +362,6 @@ See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for the full release workflow (CI, 
 | Connection timeout in browser | Auth takes 10-15s on first request. Refresh the page |
 | Permission denied (file upload/save) | Retry with sudo when prompted |
 | SFTP handshake EOF | SSH Terminal Proxy may not be enabled for this credential |
-| Copy/paste not working | Grant clipboard permissions to localhost in your browser |
+| Copy/paste not working in web terminal | Use Cmd+C/V (macOS) or Ctrl+Shift+C/V (Linux/Win); or right-click → Paste (fallback works on every browser) |
+| `segura forward` connects but the service is unreachable | Target the device loopback (`127.0.0.1:<port>`) — the tunnel is scoped to the device's own network |
+| Native `ssh` via `ssh-config` says "Permission denied" | Expected unless you have your own key/password on the device; segura only injects the vault credential for `connect`/`sftp` |
