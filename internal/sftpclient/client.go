@@ -1,11 +1,15 @@
 package sftpclient
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"io/fs"
 	"log"
 	"os"
+	"path"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -28,6 +32,12 @@ type FileInfo struct {
 }
 
 // Session holds an SSH+SFTP connection to a specific device.
+//
+// senhasegura allows only ONE device session per credential, so SFTP and an
+// interactive shell are mutually exclusive: the session toggles between them.
+// SFTP methods call ensureSFTP(); sudo methods call ensureShell() (which opens an
+// interactive device bash where senhasegura auto-injects the sudo password —
+// "SUDO Automation in progress" — since SSH exec is blocked by the proxy).
 type Session struct {
 	sshClient  *ssh.Client
 	sftpClient *sftp.Client
@@ -35,7 +45,19 @@ type Session struct {
 	mu         sync.Mutex
 	credential string
 	device     string
+	cfg        *config.Config
+
+	// Interactive PTY shell (device bash) for sudo, on its own connection.
+	sudoClient *ssh.Client
+	sudoSess   *ssh.Session
+	sudoIn     io.WriteCloser
+	sudoBuf    *bytes.Buffer
+	sudoBufMu  sync.Mutex
 }
+
+// sudoRCRe matches the exit-code sentinel we append after each shell command. The
+// echoed command line contains literal "$?" (no digits) so it never matches.
+var sudoRCRe = regexp.MustCompile(`__SEGRC__(\d+)__`)
 
 // Manager manages SFTP sessions per device connection.
 type Manager struct {
@@ -127,6 +149,7 @@ func (m *Manager) dial(credential, device string) (*Session, error) {
 		lastUsed:   time.Now(),
 		credential: credential,
 		device:     device,
+		cfg:        m.cfg,
 	}, nil
 }
 
@@ -212,6 +235,7 @@ func DialClient(cfg *config.Config, credential, device string) (*ssh.Client, err
 }
 
 func (s *Session) close() {
+	s.closeSudoShell()
 	if s.sftpClient != nil {
 		s.sftpClient.Close()
 		s.sftpClient = nil
@@ -222,11 +246,177 @@ func (s *Session) close() {
 	}
 }
 
+// closeSudoShell tears down the interactive shell + its connection.
+func (s *Session) closeSudoShell() {
+	if s.sudoIn != nil {
+		s.sudoIn.Close()
+		s.sudoIn = nil
+	}
+	if s.sudoSess != nil {
+		s.sudoSess.Close()
+		s.sudoSess = nil
+	}
+	if s.sudoClient != nil {
+		s.sudoClient.Close()
+		s.sudoClient = nil
+	}
+}
+
+// ensureSFTP switches the session into SFTP mode (closing the shell if open and
+// reconnecting the SFTP subsystem if needed). Caller must hold s.mu.
+func (s *Session) ensureSFTP() error {
+	if s.sudoIn != nil || s.sudoClient != nil {
+		s.closeSudoShell()
+	}
+	if s.sftpClient != nil {
+		return nil
+	}
+	c, err := DialClient(s.cfg, s.credential, s.device)
+	if err != nil {
+		return fmt.Errorf("SFTP reconnect: %w", err)
+	}
+	sf, err := sftp.NewClient(c)
+	if err != nil {
+		c.Close()
+		return fmt.Errorf("SFTP subsystem: %w", err)
+	}
+	s.sshClient = c
+	s.sftpClient = sf
+	return nil
+}
+
+// ensureShell switches the session into interactive-shell mode: it closes the
+// SFTP subsystem (senhasegura only grants one device session per credential, so
+// the shell would otherwise land in the proxy shell) and opens a device bash on a
+// fresh connection. Caller must hold s.mu.
+// errDeviceBusy means the interactive shell landed in the senhasegura proxy shell
+// because the device session was not (yet) free — worth a short retry.
+var errDeviceBusy = fmt.Errorf("device shell unavailable: another session is active for this credential (senhasegura allows one at a time)")
+
+// ensureShell opens the interactive device shell, retrying briefly: after the SFTP
+// subsystem is closed, senhasegura may take a moment to release the device session,
+// during which a new connection lands in the proxy shell.
+func (s *Session) ensureShell() error {
+	if s.sudoIn != nil && s.sudoClient != nil {
+		return nil
+	}
+	var err error
+	for attempt := 0; attempt < 4; attempt++ {
+		if attempt > 0 {
+			time.Sleep(4 * time.Second)
+		}
+		err = s.openShellOnce()
+		if err == nil {
+			return nil
+		}
+		if err != errDeviceBusy {
+			return err
+		}
+	}
+	return err
+}
+
+func (s *Session) openShellOnce() error {
+	if s.sudoIn != nil && s.sudoClient != nil {
+		return nil
+	}
+	// Release the device session held by SFTP.
+	if s.sftpClient != nil {
+		s.sftpClient.Close()
+		s.sftpClient = nil
+	}
+	if s.sshClient != nil {
+		s.sshClient.Close()
+		s.sshClient = nil
+	}
+
+	c, err := DialClient(s.cfg, s.credential, s.device)
+	if err != nil {
+		return fmt.Errorf("shell connect: %w", err)
+	}
+	sess, err := c.NewSession()
+	if err != nil {
+		c.Close()
+		return fmt.Errorf("shell session: %w", err)
+	}
+	modes := ssh.TerminalModes{ssh.ECHO: 0, ssh.TTY_OP_ISPEED: 38400, ssh.TTY_OP_OSPEED: 38400}
+	if err := sess.RequestPty("xterm", 40, 200, modes); err != nil {
+		sess.Close()
+		c.Close()
+		return fmt.Errorf("shell pty: %w", err)
+	}
+	in, err := sess.StdinPipe()
+	if err != nil {
+		sess.Close()
+		c.Close()
+		return err
+	}
+	out, err := sess.StdoutPipe()
+	if err != nil {
+		sess.Close()
+		c.Close()
+		return err
+	}
+	buf := &bytes.Buffer{}
+	s.sudoBuf = buf
+	go func() {
+		b := make([]byte, 8192)
+		for {
+			n, e := out.Read(b)
+			if n > 0 {
+				s.sudoBufMu.Lock()
+				buf.Write(b[:n])
+				s.sudoBufMu.Unlock()
+			}
+			if e != nil {
+				return
+			}
+		}
+	}()
+	if err := sess.Shell(); err != nil {
+		sess.Close()
+		c.Close()
+		return fmt.Errorf("shell start: %w", err)
+	}
+	s.sudoClient = c
+	s.sudoSess = sess
+	s.sudoIn = in
+
+	// PASSIVELY wait for the device bash to auto-connect. senhasegura lands you in
+	// its proxy shell first, then auto-opens the device session (target is encoded
+	// in the login name). Sending ANY input before the device bash is ready aborts
+	// that auto-connect ("terminated by Segura System Proxy") and leaves us stuck in
+	// the proxy shell — so we must NOT write anything here. The device login shell
+	// prints "Last login:" / a "user@host:~$" prompt when ready.
+	deadline := time.Now().Add(45 * time.Second)
+	for time.Now().Before(deadline) {
+		s.sudoBufMu.Lock()
+		b := buf.Bytes()
+		ready := bytes.Contains(b, []byte("Last login:")) ||
+			bytes.Contains(b, []byte(":~$")) || bytes.Contains(b, []byte(":~#"))
+		s.sudoBufMu.Unlock()
+		if ready {
+			time.Sleep(1500 * time.Millisecond) // let the prompt settle
+			s.sudoBufMu.Lock()
+			buf.Reset()
+			s.sudoBufMu.Unlock()
+			return nil
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	// Never reached device bash → the device session is unavailable (busy/blocked).
+	s.closeSudoShell()
+	return errDeviceBusy
+}
+
 // ListDir lists directory contents.
 func (s *Session) ListDir(path string) ([]FileInfo, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.lastUsed = time.Now()
+	if err := s.ensureSFTP(); err != nil {
+		return nil, err
+	}
 
 	entries, err := s.sftpClient.ReadDir(path)
 	if err != nil {
@@ -258,6 +448,9 @@ func (s *Session) ReadFile(path string, maxSize int64) ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.lastUsed = time.Now()
+	if err := s.ensureSFTP(); err != nil {
+		return nil, err
+	}
 
 	f, err := s.sftpClient.Open(path)
 	if err != nil {
@@ -294,6 +487,9 @@ func (s *Session) WriteFile(path string, data []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.lastUsed = time.Now()
+	if err := s.ensureSFTP(); err != nil {
+		return err
+	}
 
 	f, err := s.sftpClient.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
 	if err != nil {
@@ -307,19 +503,133 @@ func (s *Session) WriteFile(path string, data []byte) error {
 	return nil
 }
 
-// runSudoCmd executes a command with sudo, piping the password via stdin (-S flag).
+// runSudoCmd runs cmd as root via the interactive device shell. SSH exec is blocked
+// by the proxy, so it cannot use `sudo -S`; instead it runs `sudo bash -c '<cmd>'`
+// in a PTY where senhasegura injects the device password. The password argument is
+// unused (kept for signature compatibility). A non-zero exit becomes an error.
 func (s *Session) runSudoCmd(cmd string, password string) ([]byte, error) {
-	session, err := s.sshClient.NewSession()
-	if err != nil {
-		return nil, fmt.Errorf("SSH session failed: %w", err)
+	_ = password
+	if err := s.ensureShell(); err != nil {
+		return nil, err
 	}
-	defer session.Close()
+	log.Printf("SFTP sudo (pty): %s", cmd)
+	escaped := strings.ReplaceAll(cmd, `'`, `'\''`)
+	out, code, err := s.sendShellLine("sudo bash -c '" + escaped + "'")
+	if err != nil {
+		return out, err
+	}
+	if code != 0 {
+		return out, fmt.Errorf("sudo exited %d", code)
+	}
+	return out, nil
+}
 
-	// Use sudo -S to read password from stdin
-	fullCmd := fmt.Sprintf("echo '%s' | sudo -S %s", password, cmd)
-	log.Printf("SFTP sudo exec: %s", cmd)
-	output, err := session.CombinedOutput(fullCmd)
-	return output, err
+// writeSudoShell writes content to target as root. It stages the raw bytes in
+// /tmp over SFTP (always user-writable), then switches to the interactive shell
+// and runs a single simple `sudo cp` (heredocs over the PTY proved unreliable with
+// senhasegura's sudo automation). The staged temp is removed on success.
+func (s *Session) writeSudoShell(target string, content []byte) error {
+	// 1) Stage over SFTP.
+	if err := s.ensureSFTP(); err != nil {
+		return err
+	}
+	tmp := fmt.Sprintf("/tmp/.segura_stage_%d", time.Now().UnixNano())
+	f, err := s.sftpClient.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
+	if err != nil {
+		return fmt.Errorf("stage temp file: %w", err)
+	}
+	if _, err := f.Write(content); err != nil {
+		f.Close()
+		return fmt.Errorf("stage write: %w", err)
+	}
+	f.Close()
+
+	// 2) Privileged copy via a single sudo (ensureShell closes SFTP; the staged
+	//    /tmp file persists on the device).
+	dir := path.Dir(target)
+	cmd := "mkdir -p " + shellQuote(dir) + " && cp -f " + shellQuote(tmp) + " " + shellQuote(target) + " && rm -f " + shellQuote(tmp)
+	log.Printf("SFTP sudo write: %s (%d bytes)", target, len(content))
+	if _, err := s.runSudoCmd(cmd, ""); err != nil {
+		return err
+	}
+	return nil
+}
+
+// sendShellLine writes a command (which may span multiple lines, e.g. a heredoc)
+// to the interactive shell, appends an exit-code sentinel, and waits for it —
+// allowing time for senhasegura's "SUDO Automation". Returns output + exit code.
+func (s *Session) sendShellLine(cmd string) ([]byte, int, error) {
+	// Phase 1: run the command alone. We must NOT append the exit-code probe on the
+	// same input burst: senhasegura's "SUDO Automation" swallows any pending input
+	// while it injects the password, which would eat our probe and hang forever.
+	s.sudoBufMu.Lock()
+	s.sudoBuf.Reset()
+	s.sudoBufMu.Unlock()
+	if _, err := io.WriteString(s.sudoIn, cmd+"\n"); err != nil {
+		s.closeSudoShell()
+		return nil, -1, fmt.Errorf("shell write: %w", err)
+	}
+	// Wait for the command (incl. SUDO Automation) to finish — i.e. output goes idle.
+	out, ok := s.waitIdle(3*time.Second, 90*time.Second)
+	if !ok {
+		s.sudoBufMu.Lock()
+		dump := s.sudoBuf.String()
+		s.sudoBufMu.Unlock()
+		if len(dump) > 400 {
+			dump = dump[len(dump)-400:]
+		}
+		log.Printf("SFTP sudo TIMEOUT (phase1); buffer tail=%q", dump)
+		s.closeSudoShell()
+		return nil, -1, fmt.Errorf("shell command timed out (SUDO Automation did not complete)")
+	}
+
+	// Phase 2: now that the prompt is back, probe the exit code separately.
+	s.sudoBufMu.Lock()
+	s.sudoBuf.Reset()
+	s.sudoBufMu.Unlock()
+	if _, err := io.WriteString(s.sudoIn, "echo __SEGRC__$?__\n"); err != nil {
+		s.closeSudoShell()
+		return out, -1, fmt.Errorf("shell write: %w", err)
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		s.sudoBufMu.Lock()
+		m := sudoRCRe.FindSubmatch(s.sudoBuf.Bytes())
+		s.sudoBufMu.Unlock()
+		if m != nil {
+			code, _ := strconv.Atoi(string(m[1]))
+			return out, code, nil
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	// Couldn't read the code, but phase 1 completed — assume success.
+	return out, 0, nil
+}
+
+// waitIdle blocks until the sudo buffer receives no new bytes for `quiet` (and is
+// non-empty), or until `max` elapses. Returns the buffer contents and whether it
+// went idle. Used to detect a command's completion (prompt returned).
+func (s *Session) waitIdle(quiet, max time.Duration) ([]byte, bool) {
+	deadline := time.Now().Add(max)
+	lastLen := -1
+	lastChange := time.Now()
+	for time.Now().Before(deadline) {
+		s.sudoBufMu.Lock()
+		n := s.sudoBuf.Len()
+		s.sudoBufMu.Unlock()
+		if n != lastLen {
+			lastLen = n
+			lastChange = time.Now()
+		} else if n > 0 && time.Since(lastChange) >= quiet {
+			s.sudoBufMu.Lock()
+			out := make([]byte, s.sudoBuf.Len())
+			copy(out, s.sudoBuf.Bytes())
+			s.sudoBufMu.Unlock()
+			return out, true
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	return nil, false
 }
 
 // WriteFileSudo writes content via sudo: upload to /tmp then sudo cp to target.
@@ -327,31 +637,7 @@ func (s *Session) WriteFileSudo(path string, data []byte, password string) error
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.lastUsed = time.Now()
-
-	// 1. Upload to a temp file in /tmp
-	tmpPath := fmt.Sprintf("/tmp/.segura_tmp_%d", time.Now().UnixNano())
-
-	f, err := s.sftpClient.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
-	if err != nil {
-		return fmt.Errorf("failed to create temp file: %w", err)
-	}
-	if _, err := f.Write(data); err != nil {
-		f.Close()
-		return fmt.Errorf("failed to write temp file: %w", err)
-	}
-	f.Close()
-
-	// 2. sudo cp temp -> target
-	cmd := fmt.Sprintf("cp '%s' '%s' && chmod --reference='%s' '%s' 2>/dev/null; rm -f '%s'",
-		tmpPath, path, path, path, tmpPath)
-	output, err := s.runSudoCmd(cmd, password)
-	if err != nil {
-		s.sftpClient.Remove(tmpPath)
-		return fmt.Errorf("sudo write failed: %s %w", string(output), err)
-	}
-
-	log.Printf("SFTP sudo write: %s (%d bytes)", path, len(data))
-	return nil
+	return s.writeSudoShell(path, data)
 }
 
 // runCmd executes a plain (non-sudo) command over SSH and returns its combined output.
@@ -384,6 +670,9 @@ func cmdError(action string, out []byte, err error) error {
 func (s *Session) Exists(path string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.ensureSFTP(); err != nil {
+		return false
+	}
 	_, err := s.sftpClient.Stat(path)
 	return err == nil
 }
@@ -399,6 +688,9 @@ func (s *Session) Mkdir(path string, sudo bool, password string) error {
 			return cmdError("mkdir", out, err)
 		}
 		return nil
+	}
+	if err := s.ensureSFTP(); err != nil {
+		return err
 	}
 	if err := s.sftpClient.MkdirAll(path); err != nil {
 		return fmt.Errorf("mkdir %s: %w", path, err)
@@ -417,6 +709,9 @@ func (s *Session) CreateFile(path string, sudo bool, password string) error {
 			return cmdError("create file", out, err)
 		}
 		return nil
+	}
+	if err := s.ensureSFTP(); err != nil {
+		return err
 	}
 	f, err := s.sftpClient.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL)
 	if err != nil {
@@ -438,12 +733,11 @@ func (s *Session) Rename(oldPath, newPath string, sudo bool, password string) er
 		}
 		return nil
 	}
+	if err := s.ensureSFTP(); err != nil {
+		return err
+	}
 	if err := s.sftpClient.Rename(oldPath, newPath); err != nil {
-		// Cross-device or other SFTP rename failures fall back to mv.
-		out, cerr := s.runCmd("mv -f -- " + shellQuote(oldPath) + " " + shellQuote(newPath))
-		if cerr != nil {
-			return cmdError("move", out, cerr)
-		}
+		return fmt.Errorf("move %s -> %s: %w", oldPath, newPath, err)
 	}
 	return nil
 }
@@ -459,6 +753,9 @@ func (s *Session) Copy(src, dst string, sudo bool, password string) error {
 			return cmdError("copy", out, err)
 		}
 		return nil
+	}
+	if err := s.ensureSFTP(); err != nil {
+		return err
 	}
 	return s.copyRecursive(src, dst)
 }
@@ -521,6 +818,9 @@ func (s *Session) Remove(path string, sudo bool, password string) error {
 		}
 		return nil
 	}
+	if err := s.ensureSFTP(); err != nil {
+		return err
+	}
 	return s.removeRecursive(path)
 }
 
@@ -549,6 +849,9 @@ func (s *Session) Download(path string, w io.Writer) (int64, fs.FileInfo, error)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.lastUsed = time.Now()
+	if err := s.ensureSFTP(); err != nil {
+		return 0, nil, err
+	}
 
 	f, err := s.sftpClient.Open(path)
 	if err != nil {
@@ -573,6 +876,9 @@ func (s *Session) Upload(path string, r io.Reader) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.lastUsed = time.Now()
+	if err := s.ensureSFTP(); err != nil {
+		return 0, err
+	}
 
 	f, err := s.sftpClient.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
 	if err != nil {
@@ -587,37 +893,23 @@ func (s *Session) Upload(path string, r io.Reader) (int64, error) {
 	return n, nil
 }
 
-// UploadSudo uploads a file via sudo: write to /tmp then sudo cp to target.
+// UploadSudo uploads a file as root via the interactive shell (senhasegura injects
+// the sudo password). The content is buffered then written with a single sudo, so
+// it works for directories outside the user's home where SFTP is denied.
 func (s *Session) UploadSudo(path string, r io.Reader, password string) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.lastUsed = time.Now()
 
-	// 1. Upload to temp file
-	tmpPath := fmt.Sprintf("/tmp/.segura_up_%d", time.Now().UnixNano())
-	f, err := s.sftpClient.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
+	data, err := io.ReadAll(r)
 	if err != nil {
-		return 0, fmt.Errorf("failed to create temp file: %w", err)
+		return 0, fmt.Errorf("read upload: %w", err)
 	}
-
-	n, err := io.Copy(f, r)
-	f.Close()
-	if err != nil {
-		s.sftpClient.Remove(tmpPath)
-		return n, fmt.Errorf("upload to temp failed: %w", err)
+	if err := s.writeSudoShell(path, data); err != nil {
+		return 0, err
 	}
-
-	// 2. sudo cp temp to target, create parent dirs if needed
-	cmd := fmt.Sprintf("mkdir -p \"$(dirname '%s')\" && cp '%s' '%s' && rm -f '%s'",
-		path, tmpPath, path, tmpPath)
-	output, err := s.runSudoCmd(cmd, password)
-	if err != nil {
-		s.sftpClient.Remove(tmpPath)
-		return 0, fmt.Errorf("sudo upload failed: %s %w", string(output), err)
-	}
-
-	log.Printf("SFTP sudo upload: %s (%d bytes)", path, n)
-	return n, nil
+	log.Printf("SFTP sudo upload: %s (%d bytes)", path, len(data))
+	return int64(len(data)), nil
 }
 
 // Stat returns file info for a path.
@@ -625,6 +917,9 @@ func (s *Session) Stat(path string) (fs.FileInfo, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.lastUsed = time.Now()
+	if err := s.ensureSFTP(); err != nil {
+		return nil, err
+	}
 
 	return s.sftpClient.Stat(path)
 }
@@ -634,6 +929,9 @@ func (s *Session) Getwd() (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.lastUsed = time.Now()
+	if err := s.ensureSFTP(); err != nil {
+		return "", err
+	}
 
 	return s.sftpClient.Getwd()
 }

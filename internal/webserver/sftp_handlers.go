@@ -176,12 +176,25 @@ func (s *Server) handleSFTPUpload(w http.ResponseWriter, r *http.Request) {
 
 		var n int64
 		var uploadErr error
+		usedSudo := useSudo
 		if useSudo {
 			n, uploadErr = sess.UploadSudo(remotePath, f, s.cfg.Password)
+			f.Close()
 		} else {
 			n, uploadErr = sess.Upload(remotePath, f)
+			f.Close()
+			// Auto-escalate: uploading outside the user's home is denied over SFTP,
+			// but the user is a sudoer, so retry as root (senhasegura injects the
+			// device password at the sudo prompt). Reopen the multipart file since
+			// the first attempt consumed it.
+			if uploadErr != nil && sftpclient.IsPermissionError(uploadErr) {
+				if f2, e := fh.Open(); e == nil {
+					n, uploadErr = sess.UploadSudo(remotePath, f2, s.cfg.Password)
+					f2.Close()
+					usedSudo = true
+				}
+			}
 		}
-		f.Close()
 
 		if uploadErr != nil {
 			isPerm := sftpclient.IsPermissionError(uploadErr)
@@ -195,7 +208,7 @@ func (s *Server) handleSFTPUpload(w http.ResponseWriter, r *http.Request) {
 			})
 		} else {
 			results = append(results, map[string]interface{}{
-				"name": remoteName, "size": n, "status": "ok", "sudo": useSudo,
+				"name": remoteName, "size": n, "status": "ok", "sudo": usedSudo,
 			})
 		}
 	}
@@ -285,7 +298,11 @@ func (s *Server) handleSFTPMkdir(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"path required"}`, http.StatusBadRequest)
 		return
 	}
-	if err := sess.Mkdir(req.Path, sudo, s.cfg.Password); err != nil {
+	err := sess.Mkdir(req.Path, sudo, s.cfg.Password)
+	if err != nil && !sudo && sftpclient.IsPermissionError(err) {
+		err = sess.Mkdir(req.Path, true, s.cfg.Password)
+	}
+	if err != nil {
 		log.Printf("SFTP mkdir error: %v", err)
 		writeSFTPErr(w, err)
 		return
@@ -304,7 +321,11 @@ func (s *Server) handleSFTPNewFile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"path required"}`, http.StatusBadRequest)
 		return
 	}
-	if err := sess.CreateFile(req.Path, sudo, s.cfg.Password); err != nil {
+	err := sess.CreateFile(req.Path, sudo, s.cfg.Password)
+	if err != nil && !sudo && sftpclient.IsPermissionError(err) {
+		err = sess.CreateFile(req.Path, true, s.cfg.Password)
+	}
+	if err != nil {
 		log.Printf("SFTP newfile error: %v", err)
 		writeSFTPErr(w, err)
 		return
@@ -326,7 +347,11 @@ func (s *Server) handleSFTPRename(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"from and to required"}`, http.StatusBadRequest)
 		return
 	}
-	if err := sess.Rename(req.From, req.To, sudo, s.cfg.Password); err != nil {
+	err := sess.Rename(req.From, req.To, sudo, s.cfg.Password)
+	if err != nil && !sudo && sftpclient.IsPermissionError(err) {
+		err = sess.Rename(req.From, req.To, true, s.cfg.Password)
+	}
+	if err != nil {
 		log.Printf("SFTP rename error: %v", err)
 		writeSFTPErr(w, err)
 		return
@@ -353,11 +378,15 @@ func (s *Server) handleSFTPCopy(w http.ResponseWriter, r *http.Request) {
 	var done []string
 	for _, src := range req.Srcs {
 		dst := uniqueDest(sess, req.DestDir, path.Base(src))
-		var err error
-		if req.Move {
-			err = sess.Rename(src, dst, sudo, s.cfg.Password)
-		} else {
-			err = sess.Copy(src, dst, sudo, s.cfg.Password)
+		do := func(useSudo bool) error {
+			if req.Move {
+				return sess.Rename(src, dst, useSudo, s.cfg.Password)
+			}
+			return sess.Copy(src, dst, useSudo, s.cfg.Password)
+		}
+		err := do(sudo)
+		if err != nil && !sudo && sftpclient.IsPermissionError(err) {
+			err = do(true)
 		}
 		if err != nil {
 			log.Printf("SFTP copy/move error: %v", err)
@@ -381,7 +410,12 @@ func (s *Server) handleSFTPDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, p := range req.Paths {
-		if err := sess.Remove(p, sudo, s.cfg.Password); err != nil {
+		err := sess.Remove(p, sudo, s.cfg.Password)
+		if err != nil && !sudo && sftpclient.IsPermissionError(err) {
+			log.Printf("SFTP delete permission denied, retrying with sudo: %s", p)
+			err = sess.Remove(p, true, s.cfg.Password)
+		}
+		if err != nil {
 			log.Printf("SFTP delete error: %v", err)
 			writeSFTPErr(w, err)
 			return
@@ -434,18 +468,33 @@ func (s *Server) handleSFTPWrite(w http.ResponseWriter, r *http.Request) {
 		}
 		log.Printf("SFTP sudo write: %s (%d bytes)", filePath, len(data))
 	} else {
-		// Normal write — detect permission errors
+		// Normal write; on permission-denied, auto-escalate to a sudo write
+		// (the user is a sudoer; senhasegura injects the device password).
 		if err := sess.WriteFile(filePath, data); err != nil {
-			log.Printf("SFTP write error: %v", err)
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusForbidden)
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"error":           fmt.Sprintf("write failed: %s", err.Error()),
-				"permissionError": sftpclient.IsPermissionError(err),
-			})
-			return
+			if !sftpclient.IsPermissionError(err) {
+				log.Printf("SFTP write error: %v", err)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusForbidden)
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"error":           fmt.Sprintf("write failed: %s", err.Error()),
+					"permissionError": false,
+				})
+				return
+			}
+			log.Printf("SFTP write permission denied, retrying with sudo: %s", filePath)
+			if serr := sess.WriteFileSudo(filePath, data, s.cfg.Password); serr != nil {
+				log.Printf("SFTP sudo write error: %v", serr)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusInternalServerError)
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"error":           fmt.Sprintf("sudo write failed: %s", serr.Error()),
+					"permissionError": sftpclient.IsPermissionError(serr),
+				})
+				return
+			}
+			useSudo = true
 		}
-		log.Printf("SFTP write: %s (%d bytes)", filePath, len(data))
+		log.Printf("SFTP write: %s (%d bytes, sudo=%v)", filePath, len(data), useSudo)
 	}
 
 	w.Header().Set("Content-Type", "application/json")

@@ -1469,6 +1469,16 @@
     var ctrlPressed = false, metaPressed = false, shiftPressed = false;
 
     keyboard.onkeydown = function(keysym) {
+        // If a real form field is focused (a modal prompt, the file-manager search,
+        // the file viewer/editor…), let the browser handle the key — do NOT forward
+        // it to the remote terminal. The hidden clipboard-helper textarea is not a
+        // "real" field, so normal terminal typing still flows through.
+        var ae = document.activeElement;
+        if (ae && ae.id !== 'clipboard-helper' &&
+            (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.isContentEditable)) {
+            return true;
+        }
+
         if (keysym === 0xFFE3 || keysym === 0xFFE4) { ctrlPressed = true; guac.sendKeyEvent(1, keysym); return true; }
         if (keysym === 0xFFE7 || keysym === 0xFFE8) { metaPressed = true; guac.sendKeyEvent(1, keysym); return true; }
         if (keysym === 0xFFE1 || keysym === 0xFFE2) { shiftPressed = true; guac.sendKeyEvent(1, keysym); return true; }
