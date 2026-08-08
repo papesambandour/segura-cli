@@ -65,16 +65,28 @@ func (sm *SessionManager) GetClient() (*webproxy.Client, error) {
 	if sm.client != nil && time.Now().Before(sm.expiration) {
 		return sm.client, nil
 	}
+	return sm.loginLocked()
+}
 
+// RefreshClient forces a fresh login, discarding any cached client. Use it when a
+// cached session looks dead (e.g. the dashboard returned no credentials because
+// senhasegura expired the session server-side before our TTL elapsed).
+func (sm *SessionManager) RefreshClient() (*webproxy.Client, error) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.client = nil
+	return sm.loginLocked()
+}
+
+// loginLocked creates and authenticates a new client, caching it. Caller holds sm.mu.
+func (sm *SessionManager) loginLocked() (*webproxy.Client, error) {
 	client, err := webproxy.NewClient(sm.cfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create client: %w", err)
 	}
-
 	if err := client.Login(); err != nil {
 		return nil, fmt.Errorf("authentication failed: %w", err)
 	}
-
 	sm.client = client
 	sm.expiration = time.Now().Add(sm.ttl)
 	return sm.client, nil

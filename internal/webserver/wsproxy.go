@@ -1,6 +1,7 @@
 package webserver
 
 import (
+	"bytes"
 	"crypto/tls"
 	"fmt"
 	"log"
@@ -8,6 +9,8 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -20,6 +23,10 @@ var upgrader = websocket.Upgrader{
 	CheckOrigin:  func(r *http.Request) bool { return true },
 	Subprotocols: []string{"guacamole"},
 }
+
+// msgboxMarker is a cheap pre-filter so the msgbox parser only runs on frames
+// that could contain one (they are rare — errors only), keeping the hot relay path fast.
+var msgboxMarker = []byte("msgbox")
 
 // handleWS proxies a WebSocket connection between the browser and senhasegura Guacamole.
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
@@ -54,8 +61,41 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("WS upgraded, authenticating for %s@%s...", username, ip)
 
+	// Keep the browser's Guacamole tunnel alive during authentication. The client
+	// tunnel (guacamole-common-js) has a 15s receiveTimeout: if no data arrives
+	// within that window it fires UPSTREAM_TIMEOUT and closes the socket. senhasegura
+	// auth can take longer than 15s (observed 21s for some credentials), which made
+	// the terminal spin forever. Periodic Guacamole "nop" instructions reset the
+	// client's timer without side effects. This is the ONLY writer to browserConn
+	// until it stops, and we wait for it to fully finish before the relay starts
+	// (gorilla/websocket forbids concurrent writers on one connection).
+	keepaliveStop := make(chan struct{})
+	keepaliveDone := make(chan struct{})
+	go func() {
+		defer close(keepaliveDone)
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-keepaliveStop:
+				return
+			case <-ticker.C:
+				if err := browserConn.WriteMessage(websocket.TextMessage, []byte("3.nop;")); err != nil {
+					return
+				}
+				dbg.log("keepalive->browser", []byte("3.nop;"))
+			}
+		}
+	}()
+
 	// Authenticate and get credentials
 	upstream, err := s.connectUpstream(username, ip, width, height)
+
+	// Stop the keepalive and wait for the goroutine to exit before writing anything
+	// else to browserConn (avoids concurrent writers).
+	close(keepaliveStop)
+	<-keepaliveDone
+
 	if err != nil {
 		log.Printf("WS upstream error: %v", err)
 		dbg.log("error", []byte("connectUpstream failed: "+err.Error()))
@@ -110,10 +150,69 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 				log.Printf("WS browser write error: %v", err)
 				return
 			}
+			// senhasegura signals fatal connection problems (e.g. server-side
+			// credential decryption failures) with a non-standard `msgbox` Error
+			// instruction that guacamole-common-js ignores — leaving the terminal
+			// spinning forever. Translate it into a standard Guacamole `error` so the
+			// client's onerror handler shows the real reason and stops waiting. This
+			// goroutine is the only writer to browserConn, so the extra write is safe.
+			if bytes.Contains(msg, msgboxMarker) {
+				if sev, m, ok := parseGuacMsgbox(msg); ok && strings.EqualFold(sev, "error") {
+					log.Printf("WS upstream msgbox error for %s@%s: %s", username, ip, m)
+					dbg.log("msgbox->error", []byte(m))
+					errInstr := fmt.Sprintf("5.error,%d.%s,3.512;", len(m), m)
+					browserConn.WriteMessage(websocket.TextMessage, []byte(errInstr))
+				}
+			}
 		}
 	}()
 
 	<-done
+}
+
+// parseGuacMsgbox scans a Guacamole frame for a `msgbox` instruction and returns
+// its severity and message. Guacamole elements are LENGTH.VALUE, comma-separated,
+// each instruction terminated by ';' (e.g. "6.msgbox,5.Error,20.some message;").
+func parseGuacMsgbox(frame []byte) (severity, message string, found bool) {
+	s := string(frame)
+	i := 0
+	for i < len(s) {
+		var elems []string
+		for i < len(s) {
+			dot := strings.IndexByte(s[i:], '.')
+			if dot < 0 {
+				return "", "", false
+			}
+			n, err := strconv.Atoi(s[i : i+dot])
+			if err != nil || n < 0 {
+				return "", "", false
+			}
+			start := i + dot + 1
+			if start+n > len(s) {
+				return "", "", false
+			}
+			elems = append(elems, s[start:start+n])
+			i = start + n
+			if i >= len(s) {
+				break
+			}
+			sep := s[i]
+			i++ // consume ',' or ';'
+			if sep == ';' {
+				break
+			}
+		}
+		if len(elems) > 0 && elems[0] == "msgbox" {
+			if len(elems) >= 3 {
+				return elems[1], elems[2], true
+			}
+			if len(elems) == 2 {
+				return "", elems[1], true
+			}
+			return "", "", true
+		}
+	}
+	return "", "", false
 }
 
 // wsDebugger dumps the Guacamole-protocol frames of a web-terminal session to
@@ -175,7 +274,22 @@ func (s *Server) connectUpstream(username, ip, width, height string) (*websocket
 
 	cred := webproxy.FindCredential(credentials, username, ip)
 	if cred == nil {
-		return nil, fmt.Errorf("credential %s@%s not found", username, ip)
+		// A cached session that expired server-side returns the login page, which
+		// parses to zero credentials → the target looks "not found". Re-authenticate
+		// once with a fresh client before giving up.
+		log.Printf("WS credential %s@%s not found (%d listed); refreshing session and retrying", username, ip, len(credentials))
+		client, err = s.sm.RefreshClient()
+		if err != nil {
+			return nil, fmt.Errorf("re-authentication failed: %w", err)
+		}
+		credentials, err = client.FetchAllCredentials()
+		if err != nil {
+			return nil, fmt.Errorf("failed to fetch credentials: %w", err)
+		}
+		cred = webproxy.FindCredential(credentials, username, ip)
+		if cred == nil {
+			return nil, fmt.Errorf("credential %s@%s not found", username, ip)
+		}
 	}
 
 	proxyURL, err := client.GetProxyURL(cred.SRToken)

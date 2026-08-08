@@ -378,13 +378,21 @@ func (c *Client) ExchangeTokens(proxyURL string) (*GuacSession, error) {
 	if len(parts) < 2 {
 		return nil, fmt.Errorf("invalid proxy URL format")
 	}
-	fullPath := strings.TrimRight(parts[1], "/,")
-	tokenParts := strings.SplitN(fullPath, "/", 2)
+	tokenParts := strings.SplitN(parts[1], "/", 2)
 	if len(tokenParts) < 2 {
 		return nil, fmt.Errorf("invalid proxy URL token format")
 	}
 	tenant := tokenParts[0]
-	oasToken := strings.TrimRight(tokenParts[1], ",")
+
+	// Extract the OAS token from ".../client/<tenant>/<token>,,?lang=en_US".
+	// senhasegura appends a query string (e.g. "?lang=en_US") and a trailing ","
+	// terminator after the token; both must be stripped or guacd decrypts a
+	// corrupted GUAC_ID and fails with "digital envelope routines::invalid key".
+	oasToken := tokenParts[1]
+	if i := strings.IndexAny(oasToken, "?#"); i >= 0 {
+		oasToken = oasToken[:i]
+	}
+	oasToken = strings.Trim(oasToken, "/,")
 
 	resp, err := c.http.PostForm(c.baseURL+"/proxy/api/tokens", url.Values{"token": {oasToken}})
 	if err != nil {

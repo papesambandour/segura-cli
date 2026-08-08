@@ -36,9 +36,14 @@
     var guacDisplay = guac.getDisplay();
     displayEl.appendChild(guacDisplay.getElement());
 
+    // Remembers a fatal error message so the follow-up "Disconnected" state
+    // change doesn't overwrite it (the user must see WHY it failed).
+    var connError = null;
+
     guac.onerror = function(error) {
+        connError = (error && error.message) ? error.message : 'Unknown error';
         statusOverlay.style.display = 'block';
-        statusText.textContent = 'Connection error: ' + (error.message || 'Unknown error');
+        statusText.textContent = 'Connection error: ' + connError;
         statusText.style.color = '#f85149';
     };
 
@@ -52,8 +57,15 @@
                 // Show Files button — SFTP is handled by backend
                 fmBtn.classList.add('visible');
                 break;
-            case 4: statusOverlay.style.display = 'block'; statusText.textContent = 'Disconnecting...'; break;
-            case 5: statusOverlay.style.display = 'block'; statusText.textContent = 'Disconnected'; break;
+            case 4:
+                if (connError) return; // keep the error visible
+                statusOverlay.style.display = 'block'; statusText.textContent = 'Disconnecting...';
+                break;
+            case 5:
+                statusOverlay.style.display = 'block';
+                // Preserve a fatal error message instead of replacing it with "Disconnected".
+                statusText.textContent = connError ? ('Connection error: ' + connError) : 'Disconnected';
+                break;
         }
     };
 
